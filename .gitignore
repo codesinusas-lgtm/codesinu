@@ -1,0 +1,10 @@
+node_modules
+.next
+dev-build
+out
+.env.example
+.env.local
+*.tsbuildinfo
+.DS_Store
+backup-pre-repair
+examples/
