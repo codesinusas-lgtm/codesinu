@@ -11,6 +11,7 @@ export type ImportedRow = {
   reading: string;
   observation: string;
   novelty: string;
+  workerName?: string;
   updatedAt: number;
   synced: boolean;
   version: number;
@@ -28,6 +29,7 @@ function readingCellValue(rawValue: string): string | number | null {
 const recognizedHeaders = new Set([
   'NOMBRE', 'DIRECCION', 'RUTA', 'CONSEC', 'BARRIO', 'CONTRATO',
   'PRODUCTO', 'MEDIDOR', 'LECTURA', 'OBSERVACION', 'MOTIVO_NOVEDAD',
+  'TRABAJADOR', 'LECTOR', 'ASIGNADO_A', 'ASIGNADO A',
 ]);
 
 function headerName(value: ExcelJS.CellValue, column: number): string {
@@ -61,7 +63,7 @@ function findHeader(worksheet: ExcelJS.Worksheet) {
     });
     const nameColumn = headers.findIndex(header => header?.toLocaleUpperCase('es') === 'NOMBRE');
     const readingColumn = headers.findIndex(header => header?.toLocaleUpperCase('es') === 'LECTURA');
-    if (nameColumn > 0 && readingColumn > 0) return { rowNumber, headers, readingColumn };
+    if (nameColumn > 0 && readingColumn > 0) return { rowNumber, headers, nameColumn, readingColumn };
   }
   return null;
 }
@@ -77,6 +79,8 @@ export async function parseWorkbook(file: File, cycleId: string) {
   const sheetNames: string[] = [];
   const dataSheetNames: string[] = [];
   const skippedSheets: string[] = [];
+  const sheetRows = new Map<string, ImportedRow[]>();
+  const workerFieldHeaders = new Set(['TRABAJADOR', 'LECTOR', 'ASIGNADO_A', 'ASIGNADO A']);
 
   workbook.eachSheet(worksheet => {
     sheetNames.push(worksheet.name);
@@ -94,8 +98,14 @@ export async function parseWorkbook(file: File, cycleId: string) {
       throw new Error(`La hoja “${worksheet.name}” tiene encabezados duplicados: ${[...new Set(duplicateHeaders)].join(', ')}.`);
     }
 
+    const workerColumn = detected.headers.findIndex(header => workerFieldHeaders.has(header?.toLocaleUpperCase('es') || ''));
+    const parsedSheetRows: ImportedRow[] = [];
+
     worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
       if (rowNumber <= detected.rowNumber) return;
+      const repeatedNameHeader = headerName(row.getCell(detected.nameColumn).value, detected.nameColumn).toLocaleUpperCase('es');
+      const repeatedReadingHeader = headerName(row.getCell(detected.readingColumn).value, detected.readingColumn).toLocaleUpperCase('es');
+      if (repeatedNameHeader === 'NOMBRE' && repeatedReadingHeader === 'LECTURA') return;
       const base: Record<string, SpreadsheetCell> = {};
       detected.headers.forEach((header, column) => {
         if (column > 0 && header) base[header] = cellToScalar(row.getCell(column).value);
@@ -103,7 +113,7 @@ export async function parseWorkbook(file: File, cycleId: string) {
       if (!Object.values(base).some(value => value !== null && value !== '')) return;
 
       const readingValue = cellToScalar(row.getCell(detected.readingColumn).value);
-      rows.push({
+      const imported: ImportedRow = {
         id: `${cycleId}__${encodeURIComponent(worksheet.name)}__${rowNumber}`,
         cycleId,
         sheetName: worksheet.name,
@@ -112,18 +122,68 @@ export async function parseWorkbook(file: File, cycleId: string) {
         reading: readingValue === null ? '' : String(readingValue),
         observation: '',
         novelty: '',
+        workerName: workerColumn > 0 ? String(cellToScalar(row.getCell(workerColumn).value) ?? '').trim() || undefined : undefined,
         updatedAt: Date.now(),
         synced: false,
         version: 0,
-      });
+      };
+      rows.push(imported);
+      parsedSheetRows.push(imported);
     });
+    sheetRows.set(worksheet.name, parsedSheetRows);
   });
 
   if (!dataSheetNames.length) {
     throw new Error('No encontré hojas con encabezados NOMBRE y LECTURA dentro de las primeras 30 filas.');
   }
   if (!rows.length) throw new Error('Encontré encabezados válidos, pero no hay registros para importar.');
-  return { rows, sheetNames, dataSheetNames, skippedSheets };
+
+  // A workbook with one master sheet and smaller tabs whose contracts all match
+  // the master is a common field assignment format: each tab belongs to its worker.
+  const master = [...sheetRows.entries()].sort((a, b) => b[1].length - a[1].length)[0];
+  const workerSheetNames = new Set<string>();
+  const workersByReadingId = new Map<string, string>();
+  if (master && master[1].length > 0) {
+    const uniqueFields = ['PRODUCTO', 'CONTRATO', 'MEDIDOR', 'CONSEC'].filter(field => {
+      const values = master[1].map(row => String(row.base[field] ?? '').trim()).filter(Boolean);
+      return values.length === master[1].length && new Set(values).size === values.length;
+    });
+    const masterIndex = new Map<string, ImportedRow>();
+    for (const row of master[1]) {
+      for (const field of uniqueFields) masterIndex.set(`${field}::${String(row.base[field]).trim()}`, row);
+    }
+    const matchMasterRow = (row: ImportedRow) => {
+      for (const field of uniqueFields) {
+        const value = String(row.base[field] ?? '').trim();
+        const match = value ? masterIndex.get(`${field}::${value}`) : undefined;
+        if (match) return match;
+      }
+      return undefined;
+    };
+    for (const [name, sheetRowsForWorker] of sheetRows) {
+      if (name === master[0] || !sheetRowsForWorker.length || sheetRowsForWorker.length >= master[1].length) continue;
+      const allRowsBelongToMaster = sheetRowsForWorker.every(row => matchMasterRow(row));
+      if (allRowsBelongToMaster) {
+        workerSheetNames.add(name);
+        for (const row of sheetRowsForWorker) {
+          const masterRow = matchMasterRow(row);
+          if (!masterRow) continue;
+          const workerName = row.workerName?.trim() || name.trim();
+          const previousWorker = workersByReadingId.get(masterRow.id);
+          if (previousWorker && previousWorker !== workerName) {
+            throw new Error(`La lectura con PRODUCTO ${masterRow.base.PRODUCTO ?? ''} aparece en las pestañas de ${previousWorker} y ${workerName}. Corrige la asignación duplicada en el Excel.`);
+          }
+          workersByReadingId.set(masterRow.id, workerName);
+        }
+      }
+    }
+  }
+  for (const row of rows) {
+    if (row.sheetName === master?.[0] && !row.workerName) row.workerName = workersByReadingId.get(row.id);
+  }
+  const sourceCounts = Object.fromEntries([...sheetRows].map(([name, values]) => [name, values.length]));
+  const importedRows = rows.filter(row => !workerSheetNames.has(row.sheetName));
+  return { rows: importedRows, sheetNames, dataSheetNames, skippedSheets, sourceCounts };
 }
 
 export async function exportWorkbook(
@@ -135,8 +195,23 @@ export async function exportWorkbook(
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateBytes as never);
   const selected = selectedSheetNames ? new Set(selectedSheetNames) : null;
-  const map = new Map(readings.map(reading => [`${reading.sheetName}__${reading.rowNumber}`, reading]));
-
+  const fallbackIndex = new Map<string, Reading>();
+  const fallbackFields: string[] = [];
+  for (const field of ['PRODUCTO', 'CONTRATO', 'MEDIDOR', 'CONSEC']) {
+    const byValue = new Map<string, Reading[]>();
+    for (const reading of readings) {
+      const value = String(reading.base[field] ?? '').trim();
+      if (!value) continue;
+      const group = byValue.get(value) || [];
+      group.push(reading);
+      byValue.set(value, group);
+    }
+    const uniqueEntries = [...byValue.entries()].filter(([, group]) => group.length === 1);
+    if (uniqueEntries.length) {
+      fallbackFields.push(field);
+      for (const [value, group] of uniqueEntries) fallbackIndex.set(`${field}::${value}`, group[0]);
+    }
+  }
   workbook.eachSheet(sheet => {
     if (selected && !selected.has(sheet.name)) return;
     const detected = findHeader(sheet);
@@ -157,14 +232,46 @@ export async function exportWorkbook(
       return column;
     };
 
+    const writeReading = (row: ExcelJS.Row, reading: Reading) => {
+      for (const [key, value] of Object.entries(reading.base)) {
+        const column = headers[key.toLocaleUpperCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g, '')];
+        if (column) row.getCell(column).value = value;
+      }
+      row.getCell(readingColumn).value = readingCellValue(reading.reading);
+      row.getCell(ensureColumn('OBSERVACION')).value = reading.observation || null;
+      row.getCell(ensureColumn('MOTIVO_NOVEDAD')).value = reading.novelty || null;
+    };
+
+    const sheetReadings = readings.filter(reading => reading.sheetName === sheet.name)
+      .sort((a, b) => a.rowNumber - b.rowNumber);
+    const directRows = new Map(sheetReadings.map(reading => [reading.rowNumber, reading]));
     sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
       if (rowNumber <= detected.rowNumber) return;
-      const reading = map.get(`${sheet.name}__${rowNumber}`);
-      if (!reading) return;
-      row.getCell(readingColumn).value = readingCellValue(reading.reading);
-      if (reading.observation) row.getCell(ensureColumn('OBSERVACION')).value = reading.observation;
-      if (reading.novelty) row.getCell(ensureColumn('MOTIVO_NOVEDAD')).value = reading.novelty;
+      let reading = directRows.get(rowNumber);
+      if (!reading) {
+        for (const field of fallbackFields) {
+          const column = headers[field];
+          const value = column ? String(cellToScalar(row.getCell(column).value) ?? '').trim() : '';
+          const match = value ? fallbackIndex.get(`${field}::${value}`) : undefined;
+          if (match) { reading = match; break; }
+        }
+      }
+      if (reading) writeReading(row, reading);
     });
+    for (const reading of sheetReadings) {
+      if (reading.rowNumber <= detected.rowNumber) continue;
+      if (reading.rowNumber <= sheet.rowCount) continue;
+      const isNewRow = reading.rowNumber > sheet.rowCount;
+      const row = sheet.getRow(reading.rowNumber);
+      if (isNewRow) {
+        const previous = sheet.getRow(reading.rowNumber - 1);
+        row.height = previous.height;
+        for (let column = 1; column <= Math.max(sheet.columnCount, previous.cellCount); column++) {
+          row.getCell(column).style = structuredClone(previous.getCell(column).style);
+        }
+      }
+      writeReading(row, reading);
+    }
   });
 
   const buffer = await workbook.xlsx.writeBuffer();

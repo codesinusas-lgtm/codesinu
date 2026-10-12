@@ -5,7 +5,7 @@ import type { User } from '@supabase/supabase-js';
 import { useRouter } from 'next/navigation';
 import {
   ArrowDownToLine, BookOpen, CheckCircle2, CircleHelp, Cloud, FileSpreadsheet,
-  Eye, LayoutDashboard, LogOut, Plus, RefreshCw, ShieldCheck, Upload, Users, Wifi, WifiOff,
+  Eye, LayoutDashboard, LogOut, Plus, RefreshCw, ShieldCheck, Upload, Users, Wifi, WifiOff, Pencil, Trash2,
 } from 'lucide-react';
 import { getSupabase, supabaseConfigured } from '@/lib/supabase/client';
 import { fetchCycleReadings, readingToDb, readingFromDb } from '@/lib/supabase/data';
@@ -35,14 +35,72 @@ type ImportPreview = {
   sheetNames: string[];
   dataSheetNames: string[];
   skippedSheets: string[];
+  sourceCounts: Record<string, number>;
   fingerprint: string;
 };
 
 const BATCH_SIZE = 400;
+const DETAIL_PAGE_SIZE = 100;
 const previewFields = ['NOMBRE', 'DIRECCION', 'RUTA', 'CONSEC', 'CONTRATO', 'MEDIDOR', 'LECTURA'];
 
 function safeDocumentPart(value: string) {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'ciclo';
+}
+
+function normalizeWorkerName(value: string) {
+  return value.trim().replace(/\s+/g, ' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('es');
+}
+
+function findDuplicateReadings(readings: Reading[]) {
+  const sheetCounts = new Map<string, number>();
+  for (const reading of readings) sheetCounts.set(reading.sheetName, (sheetCounts.get(reading.sheetName) || 0) + 1);
+  const masterSheet = [...sheetCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+  const groups = new Map<string, Reading[]>();
+  for (const reading of readings) {
+    const product = String(reading.base.PRODUCTO ?? '').trim();
+    if (!product) continue;
+    const group = groups.get(product) || [];
+    group.push(reading);
+    groups.set(product, group);
+  }
+  const duplicateGroups: Array<{ canonical: Reading; copies: Reading[]; merged: Reading }> = [];
+  let conflictingGroups = 0;
+  for (const group of groups.values()) {
+    if (group.length < 2 || !group.some(row => row.sheetName === masterSheet) || !group.some(row => row.sheetName !== masterSheet)) continue;
+    const masterRows = group.filter(row => row.sheetName === masterSheet);
+    const canonical = masterRows[0];
+    const readingsSet = new Set(group.map(row => row.reading.trim()).filter(Boolean));
+    const workerSet = new Set(group.map(row => row.workerUid).filter((uid): uid is string => Boolean(uid)));
+    const identityConflict = ['CONTRATO', 'MEDIDOR', 'CONSEC', 'NOMBRE', 'DIRECCION'].some(field =>
+      new Set(group.map(row => String(row.base[field] ?? '').trim().toLocaleLowerCase('es')).filter(Boolean)).size > 1,
+    );
+    if (masterRows.length !== 1 || readingsSet.size > 1 || workerSet.size > 1 || identityConflict) {
+      conflictingGroups += 1;
+      continue;
+    }
+    const copies = group.filter(row => row.id !== canonical.id);
+    const uniqueText = (values: string[]) => [...new Set(values.map(value => value.trim()).filter(Boolean))].join(' · ');
+    const assignedCopy = group.find(row => row.workerUid);
+    duplicateGroups.push({
+      canonical,
+      copies,
+      merged: {
+        ...canonical,
+        workerUid: canonical.workerUid || assignedCopy?.workerUid || null,
+        assignmentId: canonical.assignmentId || assignedCopy?.assignmentId || null,
+        assignedAt: canonical.assignedAt || assignedCopy?.assignedAt,
+        reading: canonical.reading.trim() ? canonical.reading : [...readingsSet][0] || '',
+        observation: uniqueText(group.map(row => row.observation)),
+        novelty: uniqueText(group.map(row => row.novelty)),
+      },
+    });
+  }
+  return {
+    masterSheet,
+    duplicateGroups,
+    conflictingGroups,
+    duplicateCount: duplicateGroups.reduce((total, group) => total + group.copies.length, 0),
+  };
 }
 
 async function fingerprintFile(bytes: ArrayBuffer) {
@@ -87,6 +145,9 @@ export default function AdminPage() {
   const [detailSheetFilter, setDetailSheetFilter] = useState('all');
   const [detailWorkerFilter, setDetailWorkerFilter] = useState('all');
   const [detailStatusFilter, setDetailStatusFilter] = useState<'all' | 'assigned' | 'unassigned' | 'completed' | 'pending'>('all');
+  const [detailPage, setDetailPage] = useState(0);
+  const [editingReading, setEditingReading] = useState<Reading | null>(null);
+  const [savingReading, setSavingReading] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -255,6 +316,7 @@ export default function AdminPage() {
   const completed = readings.filter(item => item.reading.trim() !== '' || item.novelty.trim() !== '').length;
   const pending = Math.max(0, readings.length - completed);
   const assignedCount = readings.filter(item => Boolean(item.workerUid)).length;
+  const duplicateAnalysis = useMemo(() => findDuplicateReadings(readings), [readings]);
   const sheetOptions = [...new Set(readings.map(item => item.sheetName))].sort((a, b) => a.localeCompare(b, 'es'));
   const assignmentSummary = useMemo(() => {
     const summary = new Map<string, { workerUid: string; sheetName: string; total: number; completed: number }>();
@@ -279,8 +341,12 @@ export default function AdminPage() {
       if (detailStatusFilter === 'completed' && !(item.reading.trim() || item.novelty.trim())) return false;
       if (detailStatusFilter === 'pending' && (item.reading.trim() || item.novelty.trim())) return false;
       return true;
-    })
-    .slice(0, 100), [readings, search, detailSheetFilter, detailWorkerFilter, detailStatusFilter]);
+    }), [readings, search, detailSheetFilter, detailWorkerFilter, detailStatusFilter]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / DETAIL_PAGE_SIZE));
+  const visibleReadings = filtered.slice(detailPage * DETAIL_PAGE_SIZE, (detailPage + 1) * DETAIL_PAGE_SIZE);
+
+  useEffect(() => { setDetailPage(0); }, [search, detailSheetFilter, detailWorkerFilter, detailStatusFilter, cycleId]);
+  useEffect(() => { if (detailPage >= pageCount) setDetailPage(Math.max(0, pageCount - 1)); }, [detailPage, pageCount]);
 
   const readFileForPreview = useCallback(async (event: React.FormEvent) => {
     event.preventDefault();
@@ -339,6 +405,37 @@ export default function AdminPage() {
     setMessage(`Guardando ${preview.rows.length.toLocaleString()} registros en Supabase…`);
     const supabase = getSupabase();
     try {
+      const workerNames = [...new Set(preview.rows.map(row => row.workerName?.trim().replace(/\s+/g, ' ')).filter((name): name is string => Boolean(name)))];
+      const workerByName = new Map<string, Worker>();
+      for (const name of workerNames) {
+        const key = normalizeWorkerName(name);
+        const existing = workers.find(worker => normalizeWorkerName(worker.name) === key);
+        if (existing) {
+          if (existing.active === false) {
+            const { error } = await supabase.from('workers').update({ active: true }).eq('uid', existing.uid);
+            if (error) throw error;
+            existing.active = true;
+          }
+          workerByName.set(key, existing);
+          continue;
+        }
+        const created: Worker = { uid: crypto.randomUUID(), name, email: '', role: 'worker', active: true };
+        const { error } = await supabase.from('workers').insert({
+          uid: created.uid, name: created.name, email: '', role: 'worker', active: true,
+          created_at: Date.now(), created_by: user.id,
+        });
+        if (error) throw error;
+        workerByName.set(key, created);
+      }
+      if (workerNames.length) {
+        const importedWorkers = [...workerByName.values()];
+        setWorkers(current => {
+          const merged = new Map(current.map(worker => [worker.uid, worker]));
+          importedWorkers.forEach(worker => merged.set(worker.uid, worker));
+          return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'));
+        });
+        await localDB.workers.bulkPut(importedWorkers.map(worker => ({ uid: worker.uid, name: worker.name, active: worker.active !== false })));
+      }
       await localDB.templates.put({ cycleId: preview.id, name: preview.fileName, bytes: preview.bytes });
       const { error: cycleError } = await supabase.from('cycles').upsert({
         id: preview.id,
@@ -364,12 +461,54 @@ export default function AdminPage() {
         setMessage(`Guardados ${Math.min(offset + BATCH_SIZE, preview.rows.length).toLocaleString()} de ${preview.rows.length.toLocaleString()} registros…`);
       }
 
+      const assignmentGroups = new Map<string, { worker: Worker; sheetName: string; rows: ImportedRow[]; id: string }>();
+      for (const row of preview.rows) {
+        const name = row.workerName?.trim().replace(/\s+/g, ' ');
+        if (!name) continue;
+        const worker = workerByName.get(normalizeWorkerName(name));
+        if (!worker) continue;
+        const key = `${worker.uid}::${row.sheetName}`;
+        const group = assignmentGroups.get(key) || {
+          worker, sheetName: row.sheetName, rows: [],
+          id: `${preview.id}__assignment__${encodeURIComponent(worker.uid)}__${encodeURIComponent(row.sheetName)}`,
+        };
+        group.rows.push(row);
+        assignmentGroups.set(key, group);
+      }
+      const assignedAt = Date.now();
+      if (assignmentGroups.size) {
+        const assignmentRows = [...assignmentGroups.values()].map(group => ({
+          id: group.id, cycle_id: preview.id, worker_uid: group.worker.uid,
+          worker_name: group.worker.name, sheet_name: group.sheetName, mode: 'sheet',
+          start_row: null, end_row: null, record_count: group.rows.length,
+          status: 'assigning', created_at: assignedAt, created_by: user.id,
+        }));
+        const { error } = await supabase.from('assignments').upsert(assignmentRows, { onConflict: 'id' });
+        if (error) throw error;
+        let assignedRecords = 0;
+        for (const group of assignmentGroups.values()) {
+          for (let offset = 0; offset < group.rows.length; offset += BATCH_SIZE) {
+            const batch = group.rows.slice(offset, offset + BATCH_SIZE);
+            const { error: assignError } = await supabase.from('readings').update({
+              worker_uid: group.worker.uid, assignment_id: group.id, assigned_at: assignedAt,
+            }).in('id', batch.map(row => row.id));
+            if (assignError) throw assignError;
+            assignedRecords += batch.length;
+          }
+        }
+        const { error: activateError } = await supabase.from('assignments')
+          .update({ status: 'active', assigned_at: assignedAt }).in('id', [...assignmentGroups.values()].map(group => group.id));
+        if (activateError) throw activateError;
+        setMessage(`Lecturas guardadas. ${workerNames.length} trabajadores y ${assignedRecords.toLocaleString()} lecturas asignadas…`);
+      }
+
       const { error: finishError } = await supabase.from('cycles').update({ import_status: 'active', imported_at: Date.now() }).eq('id', preview.id);
       if (finishError) throw finishError;
       setSelectedCycle(preview.id);
       setFile(null);
       setPreview(null);
-      setMessage(`Importación completada: ${preview.rows.length.toLocaleString()} registros en ${preview.dataSheetNames.length} hojas de Supabase. El archivo original sigue guardado solo en este navegador.`);
+      const assignedCount = preview.rows.filter(row => row.workerName).length;
+      setMessage(`Importación completada: ${preview.rows.length.toLocaleString()} registros, ${workerByName.size} trabajadores creados o reutilizados y ${assignedCount.toLocaleString()} lecturas asignadas automáticamente. El archivo original sigue guardado solo en este navegador.`);
     } catch (error) {
       try { await supabase.from('cycles').update({ import_status: 'failed', import_error: 'La importación no terminó; no se puede asignar este ciclo.' }).eq('id', preview.id); } catch { /* Preserve the original failure. */ }
       console.error('Import failed', error);
@@ -440,6 +579,169 @@ export default function AdminPage() {
     } catch (error) {
       console.error('Worker status update failed', error);
       setMessage('No se pudo actualizar el estado del trabajador en Supabase. Verifica las políticas RLS.');
+    }
+  }
+
+  function startNewReading() {
+    if (!activeCycle) {
+      setMessage('Selecciona o importa un ciclo antes de agregar lecturas.');
+      return;
+    }
+    const sheet = sheetName && sheetOptions.includes(sheetName)
+      ? sheetName
+      : activeCycle.dataSheetNames?.[0] || activeCycle.sheetNames[0] || '';
+    const rowsOnSheet = readings.filter(item => item.sheetName === sheet);
+    const rowNumber = Math.max(1, ...rowsOnSheet.map(item => item.rowNumber)) + 1;
+    const sample = rowsOnSheet[rowsOnSheet.length - 1];
+    const base = Object.fromEntries(Object.keys(sample?.base || {}).map(key => [key, null])) as Reading['base'];
+    for (const key of ['NOMBRE', 'DIRECCION', 'RUTA', 'CONSEC', 'BARRIO', 'CONTRATO', 'PRODUCTO', 'MEDIDOR']) {
+      if (!(key in base)) base[key] = null;
+    }
+    setEditingReading({
+      id: `${activeCycle.id}__${encodeURIComponent(sheet)}__${rowNumber}`,
+      cycleId: activeCycle.id, sheetName: sheet, rowNumber, workerUid: null, assignmentId: null,
+      base, reading: '', observation: '', novelty: '', updatedAt: Date.now(), synced: false, version: 0,
+    });
+  }
+
+  async function saveAdminReading(event: React.FormEvent) {
+    event.preventDefault();
+    if (!editingReading || !user || !navigator.onLine) {
+      setMessage('Las lecturas se pueden editar localmente por trabajadores; para cambios administrativos, conéctate a internet.');
+      return;
+    }
+    const isNew = !readings.some(item => item.id === editingReading.id);
+    const saved: Reading = { ...editingReading, updatedAt: Date.now(), synced: true, version: editingReading.version + 1 };
+    setSavingReading(true);
+    try {
+      const supabase = getSupabase();
+      const result = isNew
+        ? await supabase.from('readings').insert(readingToDb(saved)).select('*').single()
+        : await supabase.from('readings').update({
+          base: saved.base, reading: saved.reading, observation: saved.observation,
+          novelty: saved.novelty, updated_at: saved.updatedAt, version: saved.version,
+        }).eq('id', saved.id).select('*').single();
+      const { data, error } = result;
+      if (error) throw error;
+      const canonical = readingFromDb(data);
+      await localDB.readings.put(canonical);
+      setReadings(current => isNew ? [...current, canonical] : current.map(item => item.id === canonical.id ? canonical : item));
+      if (isNew) {
+        const { count } = await supabase.from('readings').select('id', { count: 'exact', head: true }).eq('cycle_id', canonical.cycleId);
+        if (count !== null) {
+          await supabase.from('cycles').update({ record_count: count }).eq('id', canonical.cycleId);
+          setCycles(current => current.map(cycle => cycle.id === canonical.cycleId ? { ...cycle, recordCount: count } : cycle));
+        }
+      }
+      setEditingReading(null);
+      setMessage(isNew ? 'Lectura agregada en Supabase.' : 'Lectura completa actualizada en Supabase.');
+    } catch (error) {
+      console.error('Admin reading save failed', error);
+      const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
+      setMessage(`No se pudo guardar la lectura en Supabase${code ? ` (${code})` : ''}. Revisa conexión y permisos de administrador.`);
+    } finally {
+      setSavingReading(false);
+    }
+  }
+
+  async function deleteAdminReading(reading: Reading) {
+    if (!navigator.onLine) {
+      setMessage('Conéctate a internet para eliminar una lectura de Supabase.');
+      return;
+    }
+    const identifier = String(reading.base.NOMBRE || reading.base.CONTRATO || `fila ${reading.rowNumber}`);
+    if (!window.confirm(`¿Eliminar la lectura ${identifier} de la hoja “${reading.sheetName}”? Esta acción no se puede deshacer.`)) return;
+    setBusy(true);
+    try {
+      const { data, error } = await getSupabase().from('readings').delete().eq('id', reading.id).select('id');
+      if (error) throw error;
+      if (!data?.length) throw new Error('Supabase no confirmó la eliminación. Verifica los permisos.');
+      await localDB.readings.delete(reading.id);
+      setReadings(current => current.filter(item => item.id !== reading.id));
+      if (reading.assignmentId) {
+        const { count, error: countError } = await getSupabase().from('readings').select('id', { count: 'exact', head: true }).eq('assignment_id', reading.assignmentId);
+        if (!countError) await getSupabase().from('assignments').update({ record_count: count || 0 }).eq('id', reading.assignmentId);
+      }
+      if (activeCycle) {
+        const { count } = await getSupabase().from('readings').select('id', { count: 'exact', head: true }).eq('cycle_id', activeCycle.id);
+        if (count !== null) {
+          await getSupabase().from('cycles').update({ record_count: count }).eq('id', activeCycle.id);
+          setCycles(current => current.map(cycle => cycle.id === activeCycle.id ? { ...cycle, recordCount: count } : cycle));
+        }
+      }
+      setMessage('Lectura eliminada de Supabase.');
+    } catch (error) {
+      console.error('Admin reading deletion failed', error);
+      setMessage(`No se pudo eliminar la lectura${error instanceof Error ? `: ${error.message}` : ''}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function unifyCycleDuplicates() {
+    if (!activeCycle || !navigator.onLine) {
+      setMessage('Conéctate a internet para unificar el ciclo en Supabase.');
+      return;
+    }
+    const current = findDuplicateReadings(readings);
+    if (!current.duplicateCount) {
+      setMessage('No hay copias seguras para unificar en este ciclo.');
+      return;
+    }
+    const detail = `${current.duplicateCount.toLocaleString()} copias seguras se eliminarán después de unir sus lecturas y asignaciones en “${current.masterSheet}”. ${current.conflictingGroups ? `${current.conflictingGroups} grupos con diferencias se conservarán para revisión.` : ''}`;
+    if (!window.confirm(`${detail}\n\n¿Continuar?`)) return;
+    setBusy(true);
+    try {
+      const freshRows = await fetchCycleReadings(activeCycle.id);
+      const analysis = findDuplicateReadings(freshRows);
+      if (!analysis.duplicateCount) {
+        setReadings(freshRows);
+        setMessage('Las copias ya no están duplicadas en Supabase.');
+        return;
+      }
+      const updatedAt = Date.now();
+      const mergedRows = analysis.duplicateGroups.map(group => ({
+        ...group.merged,
+        updatedAt,
+        synced: true,
+        version: group.canonical.version + 1,
+      }));
+      const duplicateIds = analysis.duplicateGroups.flatMap(group => group.copies.map(copy => copy.id));
+      for (let offset = 0; offset < mergedRows.length; offset += BATCH_SIZE) {
+        const { error } = await getSupabase().from('readings')
+          .upsert(mergedRows.slice(offset, offset + BATCH_SIZE).map(readingToDb), { onConflict: 'id' });
+        if (error) throw error;
+      }
+      for (let offset = 0; offset < duplicateIds.length; offset += BATCH_SIZE) {
+        const { error } = await getSupabase().from('readings').delete()
+          .in('id', duplicateIds.slice(offset, offset + BATCH_SIZE));
+        if (error) throw error;
+      }
+
+      const removed = new Set(duplicateIds);
+      const replacementById = new Map(mergedRows.map(row => [row.id, row]));
+      const finalRows = freshRows.filter(row => !removed.has(row.id)).map(row => replacementById.get(row.id) || row);
+      await localDB.readings.bulkDelete(duplicateIds);
+      await localDB.readings.bulkPut(mergedRows);
+      setReadings(finalRows);
+
+      const assignmentCounts = new Map<string, number>();
+      for (const row of finalRows) if (row.assignmentId) assignmentCounts.set(row.assignmentId, (assignmentCounts.get(row.assignmentId) || 0) + 1);
+      const { data: assignments, error: assignmentLoadError } = await getSupabase().from('assignments').select('id').eq('cycle_id', activeCycle.id);
+      if (assignmentLoadError) throw assignmentLoadError;
+      for (const assignment of assignments || []) {
+        const { error } = await getSupabase().from('assignments').update({ record_count: assignmentCounts.get(assignment.id) || 0 }).eq('id', assignment.id);
+        if (error) throw error;
+      }
+      const { error: cycleUpdateError } = await getSupabase().from('cycles').update({ record_count: finalRows.length }).eq('id', activeCycle.id);
+      if (cycleUpdateError) throw cycleUpdateError;
+      setCycles(currentCycles => currentCycles.map(cycle => cycle.id === activeCycle.id ? { ...cycle, recordCount: finalRows.length } : cycle));
+      setMessage(`Ciclo unificado: ${duplicateIds.length.toLocaleString()} copias eliminadas; ${finalRows.length.toLocaleString()} lecturas únicas conservadas.${analysis.conflictingGroups ? ` Se conservaron ${analysis.conflictingGroups} grupos con conflictos para revisión.` : ''}`);
+    } catch (error) {
+      console.error('Cycle duplicate unification failed', error);
+      setMessage(`No se pudo completar la unificación${error instanceof Error ? `: ${error.message}` : ''}. Revisa Supabase y vuelve a cargar el ciclo antes de reintentar.`);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -566,8 +868,21 @@ export default function AdminPage() {
 
   const previewCounts = preview?.dataSheetNames.map(name => ({
     name,
-    count: preview.rows.filter(row => row.sheetName === name).length,
+    count: preview.sourceCounts[name] ?? preview.rows.filter(row => row.sheetName === name).length,
   })) || [];
+  const previewWorkerCounts = useMemo(() => {
+    const grouped = new Map<string, { name: string; count: number; sheets: Set<string> }>();
+    for (const row of preview?.rows || []) {
+      const name = row.workerName?.trim();
+      if (!name) continue;
+      const key = normalizeWorkerName(name);
+      const entry = grouped.get(key) || { name, count: 0, sheets: new Set<string>() };
+      entry.count += 1;
+      entry.sheets.add(row.sheetName);
+      grouped.set(key, entry);
+    }
+    return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'));
+  }, [preview]);
 
   if (authStatus !== 'allowed') {
     return <main className="worker-layout" style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 20 }}>
@@ -661,7 +976,7 @@ export default function AdminPage() {
               </label>
             </div>
             <div className="row between" style={{ marginTop: 16, flexWrap: 'wrap' }}>
-              <span className="muted small">Reconoce NOMBRE, DIRECCION, RUTA, CONSEC, BARRIO, CONTRATO, PRODUCTO, MEDIDOR y LECTURA en cualquier orden.</span>
+              <span className="muted small">Reconoce los campos de lectura y asigna automáticamente por columna TRABAJADOR/LECTOR o por pestañas de trabajadores.</span>
               <button className="btn" disabled={busy || !file || !supabaseConfigured || !user}>
                 <Upload size={16} />{busy ? 'Procesando…' : preview ? `Confirmar ${preview.rows.length.toLocaleString()} registros` : 'Validar y previsualizar'}
               </button>
@@ -669,12 +984,19 @@ export default function AdminPage() {
           </form>
           {preview && <div style={{ marginTop: 20 }}>
             <h3 style={{ fontSize: 15, marginBottom: 10 }}>Vista previa · {preview.name}</h3>
+            <div className="notice" style={{ marginBottom: 14 }}>Se guardarán {preview.rows.length.toLocaleString()} lecturas únicas. Las pestañas identificadas como copias de trabajadores se usarán para crear/reutilizar sus cuentas y asignarles las filas correspondientes; las copias no se duplicarán en la base de datos.</div>
             <div className="table-wrap" style={{ marginBottom: 14 }}>
-              <table><thead><tr><th>Hoja</th><th>Registros</th></tr></thead>
+              <table><thead><tr><th>Pestaña del Excel</th><th>Filas válidas</th></tr></thead>
                 <tbody>{previewCounts.map(item => <tr key={item.name}><td>{item.name}</td><td>{item.count.toLocaleString()}</td></tr>)}
-                  <tr><th>Total</th><th>{preview.rows.length.toLocaleString()}</th></tr></tbody>
+                </tbody>
               </table>
             </div>
+            <h3 style={{ fontSize: 15, marginBottom: 10 }}>Trabajadores y asignaciones detectados</h3>
+            {previewWorkerCounts.length ? <div className="table-wrap" style={{ marginBottom: 14 }}>
+              <table><thead><tr><th>Trabajador</th><th>Hojas</th><th>Lecturas que se asignarán</th></tr></thead>
+                <tbody>{previewWorkerCounts.map(item => <tr key={normalizeWorkerName(item.name)}><td>{item.name}</td><td>{[...item.sheets].join(', ')}</td><td>{item.count.toLocaleString()}</td></tr>)}</tbody>
+              </table>
+            </div> : <div className="notice warn" style={{ marginBottom: 14 }}>No se detectaron trabajadores en una columna ni en pestañas duplicadas de la hoja principal. Las lecturas quedarían sin asignar.</div>}
             <div className="table-wrap">
               <table><thead><tr><th>Hoja</th><th>Fila</th>{previewFields.map(field => <th key={field}>{field}</th>)}</tr></thead>
                 <tbody>{preview.rows.slice(0, 8).map(row => <tr key={row.id}>
@@ -786,13 +1108,16 @@ export default function AdminPage() {
             <div>
               <div className="eyebrow">{activeCycle?.name || 'SIN CICLO SELECCIONADO'}</div>
               <h2 className="panel-title">Detalle y exportación</h2>
-              <p className="panel-sub" style={{ marginBottom: 0 }}>Consulta el avance del ciclo y exporta el libro original con sus hojas y formato.</p>
+              <p className="panel-sub" style={{ marginBottom: 0 }}>El administrador puede agregar, editar, eliminar y exportar las lecturas completas.</p>
             </div>
-            <div style={{ textAlign: 'right' }}>
+            <div className="row" style={{ textAlign: 'right', flexWrap: 'wrap', justifyContent: 'end' }}>
+              {duplicateAnalysis.duplicateCount > 0 && <button className="btn secondary" type="button" disabled={busy} onClick={() => void unifyCycleDuplicates()}><RefreshCw size={15} />Unificar {duplicateAnalysis.duplicateCount.toLocaleString()} duplicados</button>}
+              <button className="btn secondary" type="button" disabled={!activeCycle} onClick={startNewReading}><Plus size={16} />Agregar lectura</button>
               <button className="btn" disabled={busy || !hasTemplate || !activeCycle} onClick={exportCurrent}><ArrowDownToLine size={16} />{busy ? 'Preparando…' : 'Exportar Excel'}</button>
               <div className="small muted" style={{ marginTop: 7 }}>{hasTemplate ? 'Plantilla original disponible en este dispositivo' : 'Vincula la plantilla original para habilitar la exportación'}</div>
             </div>
           </div>
+          {duplicateAnalysis.conflictingGroups > 0 && <div className="notice warn" style={{ marginBottom: 16 }}>{duplicateAnalysis.conflictingGroups} grupos tienen lecturas o trabajadores distintos entre sus copias y se conservarán para revisión.</div>}
           <div className="cards" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(145px,1fr))', marginBottom: 18 }}>
             <div className="card"><div className="stat-label">Registros</div><div className="stat-value">{readings.length.toLocaleString()}</div></div>
             <div className="card"><div className="stat-label">Asignados</div><div className="stat-value">{assignedCount.toLocaleString()}</div></div>
@@ -816,19 +1141,21 @@ export default function AdminPage() {
           </div>
           <p className="small muted" style={{ marginBottom: 10 }}>{detailWorkerFilter === 'all'
             ? 'Vista general del ciclo.'
-            : `Vista individual: ${workers.find(worker => worker.uid === detailWorkerFilter)?.name || 'trabajador seleccionado'}.`} Mostrando {filtered.length} resultados (máximo 100 por búsqueda).</p>
+            : `Vista individual: ${workers.find(worker => worker.uid === detailWorkerFilter)?.name || 'trabajador seleccionado'}.`} Mostrando {filtered.length ? detailPage * DETAIL_PAGE_SIZE + 1 : 0}–{Math.min((detailPage + 1) * DETAIL_PAGE_SIZE, filtered.length)} de {filtered.length.toLocaleString()} resultados.</p>
           <div className="table-wrap">
-            <table><thead><tr><th>CONSEC.</th><th>CONTRATO</th><th>NOMBRE</th><th>HOJA</th><th>LECTURA</th><th>ASIGNACIÓN</th><th>ESTADO</th></tr></thead>
-              <tbody>{filtered.map(reading => <tr key={reading.id}>
+            <table><thead><tr><th>CONSEC.</th><th>CONTRATO</th><th>NOMBRE</th><th>HOJA</th><th>LECTURA</th><th>ASIGNACIÓN</th><th>ESTADO</th><th>ACCIONES</th></tr></thead>
+              <tbody>{visibleReadings.map(reading => <tr key={reading.id}>
                 <td>{String(reading.base.CONSEC ?? '—')}</td><td>{String(reading.base.CONTRATO ?? '—')}</td><td>{String(reading.base.NOMBRE ?? '—')}</td>
                 <td>{reading.sheetName}</td><td>{reading.reading || <span className="muted">Pendiente</span>}</td>
                 <td>{workers.find(worker => worker.uid === reading.workerUid)?.name || workers.find(worker => worker.uid === reading.workerUid)?.email || <span className="muted">Sin asignar</span>}</td>
                 <td><span className={`pill ${reading.reading || reading.novelty ? 'green' : 'orange'}`}>{reading.reading || reading.novelty ? 'Completado' : 'Pendiente'}</span></td>
+                <td><div className="row" style={{ flexWrap: 'nowrap' }}><button className="btn secondary" type="button" onClick={() => setEditingReading({ ...reading, base: { ...reading.base } })}><Pencil size={14} />Editar</button><button className="btn secondary" type="button" disabled={busy} onClick={() => void deleteAdminReading(reading)}><Trash2 size={14} />Eliminar</button></div></td>
               </tr>)}
-                {!filtered.length && <tr><td colSpan={7} style={{ textAlign: 'center', padding: 35, color: '#68758b' }}>{supabaseConfigured ? 'No hay lecturas para mostrar. Importa un Excel o selecciona un ciclo.' : 'Configura Supabase para comenzar con datos reales.'}</td></tr>}
+                {!filtered.length && <tr><td colSpan={8} style={{ textAlign: 'center', padding: 35, color: '#68758b' }}>{supabaseConfigured ? 'No hay lecturas para mostrar. Importa un Excel o selecciona un ciclo.' : 'Configura Supabase para comenzar con datos reales.'}</td></tr>}
               </tbody>
             </table>
           </div>
+          {filtered.length > DETAIL_PAGE_SIZE && <div className="row between" style={{ marginTop: 14 }}><span className="small muted">Página {detailPage + 1} de {pageCount}</span><div className="row"><button className="btn secondary" type="button" disabled={detailPage === 0} onClick={() => setDetailPage(page => Math.max(0, page - 1))}>Anterior</button><button className="btn secondary" type="button" disabled={detailPage + 1 >= pageCount} onClick={() => setDetailPage(page => Math.min(pageCount - 1, page + 1))}>Siguiente</button></div></div>}
           <div className="small muted" style={{ marginTop: 18, lineHeight: 1.6 }}><CircleHelp size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 5 }} />La exportación usa el archivo original local y marca como “avance” los libros que tengan registros pendientes.</div>
           {activeCycle && !hasTemplate && <div className="row" style={{ marginTop: 14, flexWrap: 'wrap' }}>
             <label className="field" style={{ flex: '1 1 260px' }}>Vincular plantilla original en este dispositivo
@@ -837,6 +1164,18 @@ export default function AdminPage() {
             <button className="btn secondary" type="button" disabled={busy || !sourceTemplateFile} onClick={attachSourceTemplate}>Verificar y guardar localmente</button>
           </div>}
         </section>
+        {editingReading && <div role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !savingReading) setEditingReading(null); }} style={{ position: 'fixed', inset: 0, zIndex: 1000, background: '#101d3580', display: 'grid', placeItems: 'center', padding: 16 }}>
+          <form className="panel" onSubmit={saveAdminReading} style={{ width: 'min(760px, 100%)', maxHeight: '90vh', overflow: 'auto' }}>
+            <div className="row between" style={{ marginBottom: 18 }}><div><h2 className="panel-title">{readings.some(item => item.id === editingReading.id) ? 'Editar lectura completa' : 'Agregar lectura'}</h2><p className="panel-sub" style={{ margin: '5px 0 0' }}>Hoja {editingReading.sheetName} · fila {editingReading.rowNumber}</p></div><button className="btn secondary" type="button" disabled={savingReading} onClick={() => setEditingReading(null)}>Cerrar</button></div>
+            <div className="form-grid">
+              {Object.entries(editingReading.base).map(([key, value]) => <label className="field" key={key}>{key}<input className="input" value={value == null ? '' : String(value)} onChange={event => setEditingReading(current => current ? { ...current, base: { ...current.base, [key]: event.target.value || null } } : current)} /></label>)}
+              <label className="field">LECTURA<input className="input" value={editingReading.reading} onChange={event => setEditingReading(current => current ? { ...current, reading: event.target.value } : current)} /></label>
+              <label className="field">OBSERVACIÓN<input className="input" value={editingReading.observation} onChange={event => setEditingReading(current => current ? { ...current, observation: event.target.value } : current)} /></label>
+              <label className="field">MOTIVO DE NOVEDAD<input className="input" value={editingReading.novelty} onChange={event => setEditingReading(current => current ? { ...current, novelty: event.target.value } : current)} /></label>
+            </div>
+            <div className="row between" style={{ marginTop: 20 }}><span className="small muted">{editingReading.workerUid ? 'Asignada: conserva el trabajador actual.' : 'La lectura nueva queda sin asignar.'}</span><button className="btn" disabled={savingReading || !navigator.onLine}><CheckCircle2 size={16} />{savingReading ? 'Guardando…' : 'Guardar en Supabase'}</button></div>
+          </form>
+        </div>}
       </main>
     </div>
   );

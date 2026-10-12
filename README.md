@@ -38,6 +38,10 @@ En la pantalla de ingreso, **Configurar administrador por primera vez** crea `ad
 
 Entra como administradora, importa el `.xlsx` desde el panel y asigna hojas o rangos a trabajadores. La app normaliza las filas a registros de `readings` y guarda ciclos, trabajadores, asignaciones, presencia y capturas en Supabase. Los trabajadores entran eligiendo su nombre; ese método identifica el trabajador mediante una sesión anónima y las políticas limitan la escritura a sus lecturas asignadas. Cualquier persona con acceso a la lista de nombres podría suplantar a un trabajador; usa credenciales individuales si necesitas identidad fuerte.
 
+Durante la vista previa, la importación detecta trabajadores en las columnas `TRABAJADOR`, `LECTOR` o `ASIGNADO_A`. También reconoce libros con una pestaña maestra y pestañas de trabajadores cuyas filas coinciden por un identificador único (`PRODUCTO`, `CONTRATO`, `MEDIDOR` o `CONSEC`). Las filas de las pestañas individuales se asignan desde la pestaña maestra y no se duplican en la base de datos. Revisa el resumen de trabajadores y lecturas asignadas antes de confirmar.
+
+Si un ciclo anterior ya contiene copias en Supabase, el panel muestra **Unificar duplicados**. La herramienta conserva la fila de la pestaña principal, incorpora la lectura y asignación encontradas en las copias y elimina solo los grupos sin conflictos. Los grupos con lecturas o trabajadores distintos quedan intactos para revisión.
+
 La exportación consulta las lecturas actuales en Supabase y las vuelve a colocar en la estructura del Excel importado, manteniendo hojas y celdas de datos compatibles. El archivo original se conserva localmente en IndexedDB del navegador que lo importó. Para exportar desde otro dispositivo, vincula allí el mismo `.xlsx` original.
 
 La migración comienza reimportando el Excel desde cero. Los datos del proveedor anterior no se copian automáticamente; importa cada libro de nuevo en Supabase.
