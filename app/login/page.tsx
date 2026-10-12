@@ -56,7 +56,7 @@ export default function LoginPage() {
         console.error('Supabase worker directory load failed', cause);
         const normalizedMessage = errorMessage.toLowerCase();
         setError(normalizedMessage.includes('invalid api key')
-          ? 'Supabase rechazó la publishable key (Invalid API key). En Vercel, revisa NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY y confirma que pertenezca al mismo proyecto que NEXT_PUBLIC_SUPABASE_URL; luego crea un nuevo deployment.'
+          ? 'Supabase rechazó la publishable key (Invalid API key). En Vercel → Settings → Environment Variables, copia la key actual de Project Settings → API Keys del mismo proyecto que NEXT_PUBLIC_SUPABASE_URL y vuelve a desplegar.'
           : code === '42501' || code === 'PGRST301'
             ? 'Supabase rechazó la lectura de trabajadores por permisos. Aplica la migración SQL para habilitar la política pública de lectura de trabajadores activos.'
             : code === 'PGRST205'

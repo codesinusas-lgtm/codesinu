@@ -22,7 +22,7 @@ export async function checkSupabaseHealth(): Promise<SupabaseHealth> {
       return { connected: false, detail: 'No se encuentra public.workers. Ejecuta la migración de Supabase y recarga su esquema.' };
     }
     if (response.status === 401 && payload.message?.toLowerCase().includes('invalid api key')) {
-      return { connected: false, detail: 'Publishable key inválida. Revisa que NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY sea la key del mismo proyecto que la URL.' };
+      return { connected: false, detail: 'Supabase rechazó la publishable key. En Vercel → Settings → Environment Variables, copia la key actual de Project Settings → API Keys del mismo proyecto que la URL y vuelve a desplegar.' };
     }
     if (response.status === 401 || response.status === 403 || payload.code === '42501') {
       return { connected: false, detail: 'Supabase rechazó la lectura pública de trabajadores. Aplica la migración SQL y revisa los permisos RLS.' };

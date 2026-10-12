@@ -50,7 +50,7 @@ Para probar el modo offline local, usa `npm run build` y luego `npm start`; el s
 
 ## Vercel
 
-Importa el repositorio en Vercel y configura `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` en las variables del proyecto. Para la configuración inicial del administrador, añade también `SUPABASE_SECRET_KEY` y `ADMIN_SETUP_TOKEN` como variables de servidor, despliega, completa el formulario inicial y luego elimina las dos variables privilegiadas. No pongas secretos de servidor en variables `NEXT_PUBLIC_*`. La configuración de Authentication y el esquema/RLS deben estar aplicados en Supabase antes de probar el dominio publicado.
+Importa el repositorio en Vercel y configura `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` en **Settings → Environment Variables**, copiándolas del mismo proyecto en Supabase → **Project Settings → API Keys**. Vercel incorpora las variables públicas al compilar; después de cambiarlas, crea un nuevo deployment de Production. Si el panel muestra `Invalid API key`, la key configurada no es válida para esa URL: reemplázala con la publishable key actual del proyecto correcto. Un cambio en Git por sí solo no actualiza las variables de Vercel. Para la configuración inicial del administrador, añade también `SUPABASE_SECRET_KEY` y `ADMIN_SETUP_TOKEN` como variables de servidor, despliega, completa el formulario inicial y luego elimina las dos variables privilegiadas. No pongas secretos de servidor en variables `NEXT_PUBLIC_*`. La configuración de Authentication y el esquema/RLS deben estar aplicados en Supabase antes de probar el dominio publicado.
 
 ## Comandos
 
