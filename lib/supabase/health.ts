@@ -3,10 +3,20 @@ export type SupabaseHealth = {
   detail?: string;
 };
 
+export function isMalformedPublishableKey(key: string): boolean {
+  if (!key.startsWith('sb_publishable_')) return false;
+  const payload = key.slice('sb_publishable_'.length);
+  const separator = payload.lastIndexOf('_');
+  return separator !== 22 || payload.length - separator - 1 !== 8;
+}
+
 export async function checkSupabaseHealth(): Promise<SupabaseHealth> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim().replace(/\/+$/, '') || '';
   const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim() || '';
   if (!url || !key) return { connected: false, detail: 'Faltan las variables públicas de Supabase.' };
+  if (isMalformedPublishableKey(key)) {
+    return { connected: false, detail: 'La publishable key parece incompleta. Cópiala completa con el icono de Supabase y reemplázala en Vercel → Settings → Environment Variables; luego vuelve a desplegar.' };
+  }
 
   try {
     const response = await fetch(`${url}/rest/v1/workers?select=uid&limit=1`, {

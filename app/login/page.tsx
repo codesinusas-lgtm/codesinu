@@ -7,6 +7,7 @@ import { ArrowLeft, LockKeyhole, UserRound } from 'lucide-react';
 import { getSupabase, supabaseConfigured } from '@/lib/supabase/client';
 import { ADMIN_EMAIL, hasAdminAccess } from '@/lib/auth-roles';
 import { localDB } from '@/lib/localdb';
+import { isMalformedPublishableKey } from '@/lib/supabase/health';
 
 type WorkerOption = { uid: string; name: string; active: boolean };
 
@@ -56,7 +57,9 @@ export default function LoginPage() {
         console.error('Supabase worker directory load failed', cause);
         const normalizedMessage = errorMessage.toLowerCase();
         setError(normalizedMessage.includes('invalid api key')
-          ? 'Supabase rechazó la publishable key (Invalid API key). En Vercel → Settings → Environment Variables, copia la key actual de Project Settings → API Keys del mismo proyecto que NEXT_PUBLIC_SUPABASE_URL y vuelve a desplegar.'
+          ? isMalformedPublishableKey(process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim() || '')
+            ? 'La publishable key parece incompleta. Cópiala completa con el icono de Supabase y reemplázala en Vercel → Settings → Environment Variables; luego vuelve a desplegar.'
+            : 'Supabase rechazó la publishable key. Confirma que sea la clave actual del mismo proyecto que NEXT_PUBLIC_SUPABASE_URL y vuelve a desplegar.'
           : code === '42501' || code === 'PGRST301'
             ? 'Supabase rechazó la lectura de trabajadores por permisos. Aplica la migración SQL para habilitar la política pública de lectura de trabajadores activos.'
             : code === 'PGRST205'
