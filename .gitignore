@@ -1,7 +1,3 @@
-node_modules
-.next
-dev-build
-out
 .env.example
 .env.local
 *.tsbuildinfo
