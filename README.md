@@ -32,7 +32,7 @@ Entra como administradora, importa el `.xlsx` desde el panel y asigna hojas o ra
 
 La exportación consulta las lecturas actuales en Supabase y las vuelve a colocar en la estructura del Excel importado, manteniendo hojas y celdas de datos compatibles. El archivo original se conserva localmente en IndexedDB del navegador que lo importó. Para exportar desde otro dispositivo, vincula allí el mismo `.xlsx` original.
 
-La decisión de esta migración es reimportar Excel desde cero. Los registros que ya estén en Firebase no se copian automáticamente y permanecen en ese proyecto hasta que los elimines allí. Importa de nuevo cada libro en Supabase.
+La migración comienza reimportando el Excel desde cero. Los datos del proveedor anterior no se copian automáticamente; importa cada libro de nuevo en Supabase.
 
 ## Uso sin internet
 
