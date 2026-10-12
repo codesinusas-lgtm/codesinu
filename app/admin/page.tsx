@@ -8,10 +8,11 @@ import {
   Eye, LayoutDashboard, LogOut, Plus, RefreshCw, ShieldCheck, Upload, Users, Wifi, WifiOff, Pencil, Trash2,
 } from 'lucide-react';
 import { getSupabase, supabaseConfigured } from '@/lib/supabase/client';
-import { fetchCycleReadings, readingToDb, readingFromDb } from '@/lib/supabase/data';
+import { fetchCycleReadings, readingToDb } from '@/lib/supabase/data';
 import { ADMIN_EMAIL, hasAdminAccess } from '@/lib/auth-roles';
 import { exportWorkbook, parseWorkbook, type ImportedRow } from '@/lib/excel';
 import { localDB, type CachedCycle, type Reading } from '@/lib/localdb';
+import { queueAdminReadingDelete, queueAdminReadingUpsert, syncPendingAdminChanges } from '@/lib/sync';
 
 type Worker = { uid: string; name: string; email: string; active?: boolean; role?: string };
 type CycleRow = {
@@ -148,7 +149,32 @@ export default function AdminPage() {
   const [detailPage, setDetailPage] = useState(0);
   const [editingReading, setEditingReading] = useState<Reading | null>(null);
   const [savingReading, setSavingReading] = useState(false);
+  const [online, setOnline] = useState(true);
+  const [supabaseReachable, setSupabaseReachable] = useState(false);
+  const [pendingChanges, setPendingChanges] = useState(0);
   const router = useRouter();
+
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    update();
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => {
+      window.removeEventListener('online', update);
+      window.removeEventListener('offline', update);
+    };
+  }, []);
+
+  const refreshPendingCount = useCallback(async () => {
+    if (!user) return;
+    const [deletes, upserts] = await Promise.all([
+      localDB.pendingAdminDeletes.where('ownerUid').equals(user.id).count(),
+      localDB.pendingAdminUpserts.where('ownerUid').equals(user.id).count(),
+    ]);
+    setPendingChanges(deletes + upserts);
+  }, [user]);
+
+  useEffect(() => { void refreshPendingCount(); }, [refreshPendingCount]);
 
   useEffect(() => {
     if (!supabaseConfigured) {
@@ -187,6 +213,7 @@ export default function AdminPage() {
     const supabase = getSupabase();
     const loadAdminData = async () => {
       if (!navigator.onLine) {
+        setSupabaseReachable(false);
         const [cachedCycles, cachedWorkers] = await Promise.all([localDB.cycles.toArray(), localDB.workers.toArray()]);
         setCycles(cachedCycles);
         setWorkers(cachedWorkers.map(worker => ({ ...worker, email: '' })));
@@ -201,6 +228,7 @@ export default function AdminPage() {
       ]);
       const failed = cycleResult.error || workerResult.error || presenceResult.error;
       if (failed) {
+        setSupabaseReachable(false);
         console.error('Supabase admin data load failed', failed);
         setMessage(`Supabase no pudo cargar el panel (${failed.code || failed.message}). Revisa las políticas RLS y la conexión.`);
         return;
@@ -211,6 +239,7 @@ export default function AdminPage() {
         recordCount: row.record_count || 0, createdAt: Number(row.created_at || 0),
         sourceFingerprint: row.source_fingerprint || '',
       } as CycleRow));
+      setSupabaseReachable(true);
       setCycles(loadedCycles);
       await localDB.cycles.bulkPut(loadedCycles as CachedCycle[]);
       const loadedWorkers = (workerResult.data || []).map(row => ({
@@ -265,20 +294,36 @@ export default function AdminPage() {
         void showCachedReadings();
         return;
       }
-      void fetchCycleReadings(cycleId)
+      void (async () => {
+        try {
+          await syncPendingAdminChanges(user.id);
+        } finally {
+          await refreshPendingCount();
+        }
+        return fetchCycleReadings(cycleId);
+      })()
         .then(async rows => {
           const merged = [] as Reading[];
           const toCache = [] as Reading[];
+          const deletedIds = new Set((await localDB.pendingAdminDeletes.where('cycleId').equals(cycleId).toArray()).map(item => item.id));
           for (const remote of rows) {
+            if (deletedIds.has(remote.id)) continue;
             const local = await localDB.readings.get(remote.id);
             const row = local && !local.synced && local.updatedAt > remote.updatedAt ? local : remote;
             merged.push(row);
             if (row === remote) toCache.push(remote);
           }
           await localDB.readings.bulkPut(toCache);
+          const remoteIds = new Set(rows.map(row => row.id));
+          const cached = await localDB.readings.where('cycleId').equals(cycleId).toArray();
+          const queuedUpserts = new Set((await localDB.pendingAdminUpserts.where('ownerUid').equals(user.id).toArray()).map(item => item.id));
+          const staleIds = cached.filter(row => !remoteIds.has(row.id) && !queuedUpserts.has(row.id)).map(row => row.id);
+          if (staleIds.length) await localDB.readings.bulkDelete(staleIds);
+          setSupabaseReachable(true);
           if (active) setReadings(merged);
         })
         .catch(error => {
+          setSupabaseReachable(false);
           console.error('Supabase cycle readings load failed', error);
           if (active) {
             void showCachedReadings();
@@ -287,6 +332,7 @@ export default function AdminPage() {
         });
     };
     void refresh();
+    void refreshPendingCount();
     const channel = supabase.channel(`cycle-readings:${cycleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'readings', filter: `cycle_id=eq.${cycleId}` }, refresh)
       .subscribe();
@@ -296,7 +342,7 @@ export default function AdminPage() {
       window.removeEventListener('online', refresh);
       void supabase.removeChannel(channel);
     };
-  }, [cycleId, user]);
+  }, [cycleId, user, refreshPendingCount]);
 
   useEffect(() => {
     let mounted = true;
@@ -606,73 +652,96 @@ export default function AdminPage() {
 
   async function saveAdminReading(event: React.FormEvent) {
     event.preventDefault();
-    if (!editingReading || !user || !navigator.onLine) {
-      setMessage('Las lecturas se pueden editar localmente por trabajadores; para cambios administrativos, conéctate a internet.');
+    if (!editingReading || !user) {
+      setMessage('No se pudo preparar el cambio. Inicia sesión como administrador.');
       return;
     }
     const isNew = !readings.some(item => item.id === editingReading.id);
-    const saved: Reading = { ...editingReading, updatedAt: Date.now(), synced: true, version: editingReading.version + 1 };
     setSavingReading(true);
     try {
-      const supabase = getSupabase();
-      const result = isNew
-        ? await supabase.from('readings').insert(readingToDb(saved)).select('*').single()
-        : await supabase.from('readings').update({
-          base: saved.base, reading: saved.reading, observation: saved.observation,
-          novelty: saved.novelty, updated_at: saved.updatedAt, version: saved.version,
-        }).eq('id', saved.id).select('*').single();
-      const { data, error } = result;
-      if (error) throw error;
-      const canonical = readingFromDb(data);
-      await localDB.readings.put(canonical);
-      setReadings(current => isNew ? [...current, canonical] : current.map(item => item.id === canonical.id ? canonical : item));
-      if (isNew) {
-        const { count } = await supabase.from('readings').select('id', { count: 'exact', head: true }).eq('cycle_id', canonical.cycleId);
-        if (count !== null) {
-          await supabase.from('cycles').update({ record_count: count }).eq('id', canonical.cycleId);
-          setCycles(current => current.map(cycle => cycle.id === canonical.cycleId ? { ...cycle, recordCount: count } : cycle));
-        }
-      }
+      const saved = await queueAdminReadingUpsert(editingReading, user.id);
+      setReadings(current => isNew ? [...current, saved] : current.map(item => item.id === saved.id ? saved : item));
       setEditingReading(null);
-      setMessage(isNew ? 'Lectura agregada en Supabase.' : 'Lectura completa actualizada en Supabase.');
+      if (navigator.onLine) {
+        await syncPendingAdminChanges(user.id);
+        const canonical = await localDB.readings.get(saved.id);
+        if (canonical) setReadings(current => current.map(item => item.id === canonical.id ? canonical : item));
+        setSupabaseReachable(true);
+        setMessage(isNew ? 'Lectura guardada en este dispositivo y sincronizada con Supabase.' : 'Cambios guardados en este dispositivo y sincronizados con Supabase.');
+      } else {
+        setMessage('Lectura guardada en este dispositivo. Se enviará a Supabase cuando vuelva la conexión.');
+      }
+      await refreshPendingCount();
     } catch (error) {
       console.error('Admin reading save failed', error);
       const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
-      setMessage(`No se pudo guardar la lectura en Supabase${code ? ` (${code})` : ''}. Revisa conexión y permisos de administrador.`);
+      setSupabaseReachable(false);
+      await refreshPendingCount();
+      setMessage(`El cambio quedó guardado localmente, pero Supabase no confirmó la sincronización${code ? ` (${code})` : ''}. Se reintentará al reconectar.`);
     } finally {
       setSavingReading(false);
     }
   }
 
   async function deleteAdminReading(reading: Reading) {
-    if (!navigator.onLine) {
-      setMessage('Conéctate a internet para eliminar una lectura de Supabase.');
-      return;
-    }
+    if (!user) return;
     const identifier = String(reading.base.NOMBRE || reading.base.CONTRATO || `fila ${reading.rowNumber}`);
-    if (!window.confirm(`¿Eliminar la lectura ${identifier} de la hoja “${reading.sheetName}”? Esta acción no se puede deshacer.`)) return;
+    if (!window.confirm(`¿Eliminar la lectura ${identifier} de la hoja “${reading.sheetName}”? Se ocultará ahora y se sincronizará con Supabase al recuperar conexión.`)) return;
     setBusy(true);
     try {
-      const { data, error } = await getSupabase().from('readings').delete().eq('id', reading.id).select('id');
-      if (error) throw error;
-      if (!data?.length) throw new Error('Supabase no confirmó la eliminación. Verifica los permisos.');
-      await localDB.readings.delete(reading.id);
+      await queueAdminReadingDelete(reading, user.id);
       setReadings(current => current.filter(item => item.id !== reading.id));
-      if (reading.assignmentId) {
-        const { count, error: countError } = await getSupabase().from('readings').select('id', { count: 'exact', head: true }).eq('assignment_id', reading.assignmentId);
-        if (!countError) await getSupabase().from('assignments').update({ record_count: count || 0 }).eq('id', reading.assignmentId);
+      if (navigator.onLine) {
+        await syncPendingAdminChanges(user.id);
+        setSupabaseReachable(true);
+        setMessage('Lectura eliminada localmente y de Supabase.');
+      } else {
+        setMessage('Lectura eliminada de este dispositivo. Se confirmará en Supabase al recuperar conexión.');
       }
-      if (activeCycle) {
-        const { count } = await getSupabase().from('readings').select('id', { count: 'exact', head: true }).eq('cycle_id', activeCycle.id);
-        if (count !== null) {
-          await getSupabase().from('cycles').update({ record_count: count }).eq('id', activeCycle.id);
-          setCycles(current => current.map(cycle => cycle.id === activeCycle.id ? { ...cycle, recordCount: count } : cycle));
-        }
-      }
-      setMessage('Lectura eliminada de Supabase.');
+      await refreshPendingCount();
     } catch (error) {
       console.error('Admin reading deletion failed', error);
-      setMessage(`No se pudo eliminar la lectura${error instanceof Error ? `: ${error.message}` : ''}`);
+      setSupabaseReachable(false);
+      await refreshPendingCount();
+      setMessage(`El borrado está guardado localmente y pendiente de Supabase${error instanceof Error ? `: ${error.message}` : '.'}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteAllCycleReadings() {
+    if (!activeCycle || !user || !readings.length) return;
+    const count = readings.length;
+    if (!window.confirm(`Se eliminarán ${count.toLocaleString()} lecturas del ciclo “${activeCycle.name}”. Se conservarán las tablas, el ciclo, los trabajadores y las asignaciones. Si estás sin conexión, se aplicará en Supabase al volver la señal. ¿Continuar?`)) return;
+    setBusy(true);
+    try {
+      const deletedAt = Date.now();
+      const tombstones = readings.map(reading => ({
+        id: reading.id, cycleId: reading.cycleId, assignmentId: reading.assignmentId || null,
+        ownerUid: user.id, queuedAt: deletedAt,
+      }));
+      await localDB.transaction('rw', localDB.readings, localDB.pendingAdminDeletes, localDB.pendingAdminUpserts, async () => {
+        await localDB.pendingAdminDeletes.bulkPut(tombstones);
+        await localDB.pendingAdminUpserts.bulkDelete(readings.map(reading => reading.id));
+        await localDB.readings.bulkDelete(readings.map(reading => reading.id));
+      });
+      setReadings([]);
+      setDetailPage(0);
+      setCycles(current => current.map(cycle => cycle.id === activeCycle.id ? { ...cycle, recordCount: 0 } : cycle));
+      await localDB.cycles.update(activeCycle.id, { recordCount: 0 });
+      if (navigator.onLine) {
+        await syncPendingAdminChanges(user.id);
+        setSupabaseReachable(true);
+        setMessage(`${count.toLocaleString()} lecturas eliminadas de Supabase y del dispositivo. Las tablas y asignaciones se conservaron.`);
+      } else {
+        setMessage(`${count.toLocaleString()} lecturas eliminadas de este dispositivo. Quedaron en cola para Supabase; las tablas y asignaciones se conservaron.`);
+      }
+      await refreshPendingCount();
+    } catch (error) {
+      console.error('Bulk reading deletion failed', error);
+      setSupabaseReachable(false);
+      await refreshPendingCount();
+      setMessage(`El borrado local quedó pendiente de sincronización${error instanceof Error ? `: ${error.message}` : '.'}`);
     } finally {
       setBusy(false);
     }
@@ -932,9 +1001,12 @@ export default function AdminPage() {
             <div className="muted" style={{ fontSize: 13, marginTop: 7 }}>Importa plantillas, asigna hojas y consolida las lecturas en el libro original.</div>
           </div>
           <div className="row">
-            <span className={`pill ${supabaseConfigured ? 'green' : 'orange'}`}>
-              {supabaseConfigured ? <><Wifi size={13} /> Supabase configurado</> : <><WifiOff size={13} /> Falta configurar</>}
-            </span>
+            <div className="connection-status" role="status">
+              <span className={`pill ${!online ? 'orange' : supabaseReachable ? 'green' : 'gray'}`}>
+                {!online ? <><WifiOff size={13} /> Sin conexión · guardado local</> : supabaseReachable ? <><Wifi size={13} /> Supabase conectado</> : <><Wifi size={13} /> Supabase verificando</>}
+              </span>
+              {pendingChanges > 0 && <span className="pill orange">{pendingChanges.toLocaleString()} cambios por sincronizar</span>}
+            </div>
             <button className="btn secondary" onClick={() => location.reload()} title="Actualizar"><RefreshCw size={16} /></button>
             <div className="avatar">{(user?.email || 'AD').slice(0, 2).toUpperCase()}</div>
           </div>
@@ -1110,9 +1182,10 @@ export default function AdminPage() {
               <h2 className="panel-title">Detalle y exportación</h2>
               <p className="panel-sub" style={{ marginBottom: 0 }}>El administrador puede agregar, editar, eliminar y exportar las lecturas completas.</p>
             </div>
-            <div className="row" style={{ textAlign: 'right', flexWrap: 'wrap', justifyContent: 'end' }}>
+            <div className="admin-reading-actions">
               {duplicateAnalysis.duplicateCount > 0 && <button className="btn secondary" type="button" disabled={busy} onClick={() => void unifyCycleDuplicates()}><RefreshCw size={15} />Unificar {duplicateAnalysis.duplicateCount.toLocaleString()} duplicados</button>}
               <button className="btn secondary" type="button" disabled={!activeCycle} onClick={startNewReading}><Plus size={16} />Agregar lectura</button>
+              <button className="btn danger" type="button" disabled={busy || !activeCycle || readings.length === 0} onClick={() => void deleteAllCycleReadings()}><Trash2 size={15} />Eliminar todas ({readings.length.toLocaleString()})</button>
               <button className="btn" disabled={busy || !hasTemplate || !activeCycle} onClick={exportCurrent}><ArrowDownToLine size={16} />{busy ? 'Preparando…' : 'Exportar Excel'}</button>
               <div className="small muted" style={{ marginTop: 7 }}>{hasTemplate ? 'Plantilla original disponible en este dispositivo' : 'Vincula la plantilla original para habilitar la exportación'}</div>
             </div>

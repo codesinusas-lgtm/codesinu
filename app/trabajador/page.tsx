@@ -156,6 +156,12 @@ export default function WorkerPage() {
     const refreshRemote = () => {
       void (async () => {
         const incoming = await fetchWorkerReadings(workerUid);
+        const remoteIds = new Set(incoming.map(reading => reading.id));
+        const cachedAssigned = await localDB.readings.where('workerUid').equals(workerUid).toArray();
+        const staleCachedIds = cachedAssigned
+          .filter(reading => reading.synced && !remoteIds.has(reading.id))
+          .map(reading => reading.id);
+        if (staleCachedIds.length) await localDB.readings.bulkDelete(staleCachedIds);
         for (const remoteReading of incoming) {
           const localReading = await localDB.readings.get(remoteReading.id);
           if (!localReading || localReading.synced || remoteReading.updatedAt >= localReading.updatedAt) {

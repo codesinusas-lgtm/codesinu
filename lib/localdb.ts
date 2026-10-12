@@ -10,17 +10,22 @@ export type CachedCycle = {
   id: string; name: string; status: string; importStatus?: 'importing' | 'active' | 'failed';
   sheetNames: string[]; dataSheetNames?: string[]; recordCount?: number; createdAt?: number; sourceFingerprint?: string;
 };
+export type PendingAdminDelete = { id: string; cycleId: string; assignmentId: string | null; ownerUid: string; queuedAt: number };
+export type PendingAdminUpsert = { id: string; ownerUid: string; reading: Reading; queuedAt: number };
 class ReadingDB extends Dexie {
   readings!: EntityTable<Reading, 'id'>;
   templates!: EntityTable<{cycleId:string; name:string; bytes:ArrayBuffer}, 'cycleId'>;
   workers!: EntityTable<{uid:string; name:string; active:boolean}, 'uid'>;
   cycles!: EntityTable<CachedCycle, 'id'>;
+  pendingAdminDeletes!: EntityTable<PendingAdminDelete, 'id'>;
+  pendingAdminUpserts!: EntityTable<PendingAdminUpsert, 'id'>;
   constructor() {
     super('sinucode-lecturas');
     this.version(1).stores({readings:'id, cycleId, sheetName, workerUid, synced, updatedAt'});
     this.version(2).stores({readings:'id, cycleId, sheetName, workerUid, synced, updatedAt',templates:'cycleId'});
     this.version(3).stores({readings:'id, cycleId, sheetName, workerUid, synced, updatedAt',templates:'cycleId',workers:'uid, name, active'});
     this.version(4).stores({readings:'id, cycleId, sheetName, workerUid, synced, updatedAt',templates:'cycleId',workers:'uid, name, active',cycles:'id, createdAt'});
+    this.version(5).stores({readings:'id, cycleId, sheetName, workerUid, synced, updatedAt',templates:'cycleId',workers:'uid, name, active',cycles:'id, createdAt',pendingAdminDeletes:'id, cycleId, assignmentId, ownerUid, queuedAt',pendingAdminUpserts:'id, ownerUid, queuedAt'});
   }
 }
 export const localDB = new ReadingDB();
