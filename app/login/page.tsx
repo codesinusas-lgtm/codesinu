@@ -54,9 +54,14 @@ export default function LoginPage() {
         const code = typeof cause === 'object' && cause && 'code' in cause ? String(cause.code) : '';
         const errorMessage = cause instanceof Error ? cause.message : '';
         console.error('Supabase worker directory load failed', cause);
-        setError(errorMessage.toLowerCase().includes('invalid api key')
-          ? 'Supabase rechazó la API key. Copia la URL y la publishable key del mismo proyecto en Supabase y reinicia la aplicación.'
-          : `No se pudo cargar la lista de Supabase${code ? ` (${code})` : ''}. Revisa la conexión y las políticas RLS.`);
+        const normalizedMessage = errorMessage.toLowerCase();
+        setError(normalizedMessage.includes('invalid api key')
+          ? 'Supabase rechazó la publishable key (Invalid API key). En Vercel, revisa NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY y confirma que pertenezca al mismo proyecto que NEXT_PUBLIC_SUPABASE_URL; luego crea un nuevo deployment.'
+          : code === '42501' || code === 'PGRST301'
+            ? 'Supabase rechazó la lectura de trabajadores por permisos. Aplica la migración SQL para habilitar la política pública de lectura de trabajadores activos.'
+            : code === 'PGRST205'
+              ? 'No se encuentra la tabla public.workers en Supabase. Ejecuta la migración del proyecto en SQL Editor.'
+              : `No se pudo cargar la lista de Supabase${code ? ` (${code})` : ''}${errorMessage ? `: ${errorMessage}` : '. Comprueba la conexión.'}`);
       } finally {
         setLoadingWorkers(false);
       }

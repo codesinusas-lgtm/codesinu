@@ -21,8 +21,11 @@ export async function checkSupabaseHealth(): Promise<SupabaseHealth> {
     if (payload.code === 'PGRST205') {
       return { connected: false, detail: 'No se encuentra public.workers. Ejecuta la migración de Supabase y recarga su esquema.' };
     }
-    if (response.status === 401 || response.status === 403) {
-      return { connected: false, detail: 'Supabase rechazó la publishable key o la lectura pública.' };
+    if (response.status === 401 && payload.message?.toLowerCase().includes('invalid api key')) {
+      return { connected: false, detail: 'Publishable key inválida. Revisa que NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY sea la key del mismo proyecto que la URL.' };
+    }
+    if (response.status === 401 || response.status === 403 || payload.code === '42501') {
+      return { connected: false, detail: 'Supabase rechazó la lectura pública de trabajadores. Aplica la migración SQL y revisa los permisos RLS.' };
     }
     return { connected: false, detail: `Supabase respondió HTTP ${response.status}.` };
   } catch {
