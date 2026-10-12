@@ -76,7 +76,7 @@ returns boolean
 language sql
 stable
 as $$
-  select lower(coalesce(auth.jwt() ->> 'email', '')) = 'anpa23co@gmail.com'
+  select lower(coalesce(auth.jwt() ->> 'email', '')) = 'admin@code.sinu'
 $$;
 
 create or replace function public.is_sinucode_worker(target_uid text)

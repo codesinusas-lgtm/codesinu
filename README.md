@@ -7,7 +7,7 @@ Aplicación Next.js para importar ciclos de lecturas desde Excel, asignar hojas 
 1. Crea un proyecto Supabase.
 2. En **SQL Editor**, ejecuta `supabase/migrations/20261011000000_initial_schema.sql`.
 3. En **Authentication → Providers**, habilita **Anonymous Sign-Ins** para el acceso de trabajadores.
-4. En **Authentication → Users**, crea la cuenta administradora `anpa23co@gmail.com` y establece una contraseña. Las políticas RLS reconocen esa dirección.
+4. En **Authentication → Users**, crea la cuenta administradora `admin@code.sinu` y establece una contraseña. Las políticas RLS reconocen esa dirección.
 5. Copia la URL del proyecto y la **publishable key** desde **Project Settings → API**.
 
 En Windows, copia `.env.example` a `.env.local` y completa:
