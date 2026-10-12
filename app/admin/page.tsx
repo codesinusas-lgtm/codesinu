@@ -417,63 +417,46 @@ export default function AdminPage() {
     }
   }, [file, supabaseConfigured, user, cycleName]);
 
-  async function confirmImport() {
+async function confirmImport() {
     if (!preview || !user) return;
     if (!navigator.onLine) {
       setMessage('Conéctate a internet antes de guardar el ciclo en Supabase.');
       return;
     }
     setBusy(true);
-    setMessage(`Guardando y asignando ${preview.rows.length.toLocaleString()} registros en Supabase…`);
+    setMessage(`Guardando y asignando registros en Supabase…`);
     const supabase = getSupabase();
     try {
-      // 1. Obtener/Crear trabajadores automáticamente (por columnas o nombres de hojas)
-      const detectedWorkerNames = new Set<string>();
-      preview.rows.forEach(row => {
-        if (row.workerName?.trim()) detectedWorkerNames.add(row.workerName.trim().replace(/\s+/g, ' '));
-      });
-      preview.sheetNames.forEach(sheet => {
-        detectedWorkerNames.add(sheet.trim().replace(/\s+/g, ' '));
-      });
-
+      // 1. Identificar trabajadores según el nombre de las hojas secundarias del Excel
+      const workerNames = preview.sheetNames.filter(name => name !== preview.dataSheetNames[0]);
       const workerByName = new Map<string, Worker>();
-      for (const name of detectedWorkerNames) {
-        const key = normalizeWorkerName(name);
-        const existing = workers.find(worker => normalizeWorkerName(worker.name) === key);
-        if (existing) {
-          if (existing.active === false) {
-            await supabase.from('workers').update({ active: true }).eq('uid', existing.uid);
-            existing.active = true;
-          }
-          workerByName.set(key, existing);
-          continue;
+
+      for (const name of workerNames) {
+        const cleanName = name.trim().replace(/\s+/g, ' ');
+        const key = normalizeWorkerName(cleanName);
+        let existing = workers.find(worker => normalizeWorkerName(worker.name) === key);
+        
+        if (!existing) {
+          const created: Worker = { uid: crypto.randomUUID(), name: cleanName, email: '', role: 'worker', active: true };
+          const { error } = await supabase.from('workers').insert({
+            uid: created.uid, name: created.name, email: '', role: 'worker', active: true,
+            created_at: Date.now(), created_by: user.id,
+          });
+          if (!error) existing = created;
         }
-        const created: Worker = { uid: crypto.randomUUID(), name, email: '', role: 'worker', active: true };
-        const { error } = await supabase.from('workers').insert({
-          uid: created.uid, name: created.name, email: '', role: 'worker', active: true,
-          created_at: Date.now(), created_by: user.id,
-        });
-        if (!error) {
-          workerByName.set(key, created);
-        }
+        if (existing) workerByName.set(key, existing);
       }
 
-      // Actualizar estado local de trabajadores
-      const allWorkersMap = new Map(workers.map(w => [w.uid, w]));
-      workerByName.forEach(w => allWorkersMap.set(w.uid, w));
-      const updatedWorkersList = [...allWorkersMap.values()].sort((a, b) => a.name.localeCompare(b.name, 'es'));
-      setWorkers(updatedWorkersList);
-      await localDB.workers.bulkPut(updatedWorkersList.map(worker => ({ uid: worker.uid, name: worker.name, active: worker.active !== false })));
-
       await localDB.templates.put({ cycleId: preview.id, name: preview.fileName, bytes: preview.bytes });
-      
+
+      // 2. Registrar el ciclo
       const { error: cycleError } = await supabase.from('cycles').upsert({
         id: preview.id,
         name: preview.name,
         status: 'active',
         import_status: 'importing',
-        sheet_names: preview.sheetNames,
-        data_sheet_names: preview.dataSheetNames,
+        sheet_names: [preview.dataSheetNames[0]], // Dejar la principal como hoja oficial
+        dataSheet_names: preview.dataSheetNames,
         source_file_name: preview.fileName,
         source_fingerprint: preview.fingerprint,
         record_count: preview.rows.length,
@@ -482,84 +465,74 @@ export default function AdminPage() {
       });
       if (cycleError) throw cycleError;
 
-      // 2. Mapear asignaciones por hoja o columna y asociar worker_uid instantáneamente
-      const assignmentGroups = new Map<string, { worker: Worker; sheetName: string; rows: ImportedRow[]; id: string }>();
-      
+      // 3. Mapear las filas de la hoja principal asignándoles el trabajador correspondiente 
+      // si su identificador o contrato coincide con las hojas de los trabajadores.
+      const assignmentGroups = new Map<string, { worker: Worker; rows: ImportedRow[]; id: string }>();
+
       const processedRows = preview.rows.map(row => {
-        const rawWorkerName = row.workerName?.trim() || row.sheetName?.trim() || '';
-        const worker = workerByName.get(normalizeWorkerName(rawWorkerName));
-        
-        let workerUidVal = null;
+        // Si el row viene marcado de una hoja que lleva el nombre de un trabajador
+        const sheetWorker = workerByName.get(normalizeWorkerName(row.sheetName));
+        const workerUidVal = sheetWorker ? sheetWorker.uid : null;
         let assignmentIdVal = null;
 
-        if (worker) {
-          workerUidVal = worker.uid;
-          assignmentIdVal = `${preview.id}__assignment__${encodeURIComponent(worker.uid)}__${encodeURIComponent(row.sheetName)}`;
-          
-          const key = `${worker.uid}::${row.sheetName}`;
-          const group = assignmentGroups.get(key) || {
-            worker, 
-            sheetName: row.sheetName, 
+        if (sheetWorker) {
+          assignmentIdVal = `${preview.id}__assignment__${encodeURIComponent(sheetWorker.uid)}`;
+          const group = assignmentGroups.get(sheetWorker.uid) || {
+            worker: sheetWorker,
             rows: [],
             id: assignmentIdVal,
           };
           group.rows.push(row);
-          assignmentGroups.set(key, group);
+          assignmentGroups.set(sheetWorker.uid, group);
         }
 
         return {
           ...row,
+          sheetName: preview.dataSheetNames[0], // Forzar que pertenezcan a la hoja principal del ciclo
           workerUid: workerUidVal,
           assignmentId: assignmentIdVal,
         };
       });
 
-      // 3. Subir lecturas en lotes con sus respectivos asignados
+      // 4. Subir las lecturas a Supabase en lotes
       for (let offset = 0; offset < processedRows.length; offset += BATCH_SIZE) {
         const batchRows = processedRows.slice(offset, offset + BATCH_SIZE).map(row => readingToDb({
-          ...row, 
-          workerUid: row.workerUid, 
-          assignmentId: row.assignmentId, 
+          ...row,
+          workerUid: row.workerUid,
+          assignmentId: row.assignmentId,
           synced: true,
         }));
         const { error } = await supabase.from('readings').upsert(batchRows, { onConflict: 'id' });
         if (error) throw error;
-        setMessage(`Guardados y asignados ${Math.min(offset + BATCH_SIZE, processedRows.length).toLocaleString()} de ${processedRows.length.toLocaleString()} registros…`);
       }
 
-      // 4. Registrar los grupos de asignación en la tabla assignments
-      const assignedAt = Date.now();
+      // 5. Guardar las asignaciones en la base de datos
       if (assignmentGroups.size) {
         const assignmentRows = [...assignmentGroups.values()].map(group => ({
-          id: group.id, 
-          cycle_id: preview.id, 
+          id: group.id,
+          cycle_id: preview.id,
           worker_uid: group.worker.uid,
-          worker_name: group.worker.name, 
-          sheet_name: group.sheetName, 
+          worker_name: group.worker.name,
+          sheet_name: preview.dataSheetNames[0],
           mode: 'sheet',
-          start_row: null, 
-          end_row: null, 
           record_count: group.rows.length,
-          status: 'active', 
-          created_at: assignedAt, 
+          status: 'active',
+          created_at: Date.now(),
           created_by: user.id,
-          assigned_at: assignedAt,
+          assigned_at: Date.now(),
         }));
-        const { error: assignError } = await supabase.from('assignments').upsert(assignmentRows, { onConflict: 'id' });
-        if (assignError) throw assignError;
+        await supabase.from('assignments').upsert(assignmentRows, { onConflict: 'id' });
       }
 
-      const { error: finishError } = await supabase.from('cycles').update({ import_status: 'active', imported_at: Date.now() }).eq('id', preview.id);
-      if (finishError) throw finishError;
+      await supabase.from('cycles').update({ import_status: 'active', imported_at: Date.now() }).eq('id', preview.id);
 
       setSelectedCycle(preview.id);
       setFile(null);
       setPreview(null);
-      setMessage(`¡Importación y asignación completada con éxito! ${processedRows.length.toLocaleString()} registros subidos y asignados a sus respectivos trabajadores.`);
+      setMessage(`¡Importación exitosa! Los registros se guardaron en la hoja principal del ciclo y se asignaron a los trabajadores según sus hojas.`);
     } catch (error) {
-      try { await supabase.from('cycles').update({ import_status: 'failed' }).eq('id', preview.id); } catch { /* Ignore */ }
       console.error('Import failed', error);
-      setMessage(error instanceof Error ? error.message : 'La importación quedó incompleta.');
+      setMessage('La importación quedó incompleta.');
     } finally {
       setBusy(false);
     }
