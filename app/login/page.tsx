@@ -47,8 +47,11 @@ export default function LoginPage() {
       } catch (cause) {
         if (!navigator.onLine) return;
         const code = typeof cause === 'object' && cause && 'code' in cause ? String(cause.code) : '';
+        const errorMessage = cause instanceof Error ? cause.message : '';
         console.error('Supabase worker directory load failed', cause);
-        setError(`No se pudo cargar la lista de Supabase${code ? ` (${code})` : ''}. Revisa la conexión y las políticas RLS.`);
+        setError(errorMessage.toLowerCase().includes('invalid api key')
+          ? 'Supabase rechazó la API key. Copia la URL y la publishable key del mismo proyecto en Supabase y reinicia la aplicación.'
+          : `No se pudo cargar la lista de Supabase${code ? ` (${code})` : ''}. Revisa la conexión y las políticas RLS.`);
       } finally {
         setLoadingWorkers(false);
       }
@@ -76,8 +79,11 @@ export default function LoginPage() {
       router.replace('/admin');
     } catch (cause) {
       const code = typeof cause === 'object' && cause && 'code' in cause ? String(cause.code) : '';
+      const errorMessage = cause instanceof Error ? cause.message : '';
       console.error('Supabase admin sign-in failed', cause);
-      setError(code === 'invalid_credentials'
+      setError(errorMessage.toLowerCase().includes('invalid api key')
+        ? 'Supabase rechazó la API key. Copia la URL y la publishable key del mismo proyecto en Supabase; en Vercel, vuelve a desplegar después de actualizarlas.'
+        : code === 'invalid_credentials'
         ? 'Supabase rechazó el correo o la contraseña. Crea la cuenta del administrador en Authentication → Users.'
         : `No se pudo iniciar sesión como administrador${code ? ` (${code})` : ''}. Comprueba las credenciales y el proyecto Supabase.`);
     } finally {
