@@ -1,5 +1,10 @@
-.env.example
-.env.local
+node_modules/
+.next/
+dev-build/
+out/
+.vercel/
+.env*
+!.env.supabase.example
 *.tsbuildinfo
 .DS_Store
 backup-pre-repair
