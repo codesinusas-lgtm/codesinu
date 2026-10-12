@@ -7,15 +7,21 @@ Aplicación Next.js para importar ciclos de lecturas desde Excel, asignar hojas 
 1. Crea un proyecto Supabase.
 2. En **SQL Editor**, ejecuta `supabase/migrations/20261011000000_initial_schema.sql`.
 3. En **Authentication → Providers**, habilita **Anonymous Sign-Ins** para el acceso de trabajadores.
-4. En **Authentication → Users**, crea la cuenta administradora `admin@code.sinu` y establece una contraseña. Las políticas RLS reconocen esa dirección.
-5. Copia la URL del proyecto y la **publishable key** desde **Project Settings → API**.
+4. Copia la URL del proyecto y la **publishable key** desde **Project Settings → API**.
 
-En Windows, copia `.env.example` a `.env.local` y completa:
+En Windows, copia `.env.supabase.example` a `.env.local` y completa:
 
 ```dotenv
 NEXT_PUBLIC_SUPABASE_URL=https://tu-proyecto.supabase.co
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+
+# Solo para configurar por primera vez la contraseña del administrador.
+# SUPABASE_SECRET_KEY nunca debe comenzar con NEXT_PUBLIC_.
+SUPABASE_SECRET_KEY=sb_secret_...
+ADMIN_SETUP_TOKEN=token_aleatorio_base64url_de_43_caracteres
 ```
+
+Genera el token en PowerShell con `node -p "require('crypto').randomBytes(32).toString('base64url')"`. Usa el mismo valor en `.env.local` y en Vercel; no lo publiques ni lo compartas.
 
 Instala dependencias y arranca el servidor:
 
@@ -24,7 +30,9 @@ npm install
 npm run dev
 ```
 
-Después de cambiar variables de entorno, reinicia `npm run dev`. La clave publishable es de cliente y depende de que RLS esté configurado; nunca pongas una `service_role` key en una variable `NEXT_PUBLIC_*` ni en el navegador.
+Después de cambiar variables de entorno, reinicia `npm run dev`. La clave publishable es de cliente y depende de que RLS esté configurado; nunca pongas una `service_role` o `sb_secret_` key en una variable `NEXT_PUBLIC_*` ni en el navegador.
+
+En la pantalla de ingreso, **Configurar administrador por primera vez** crea `admin@code.sinu` o establece su contraseña si el usuario ya existe. El código usa `SUPABASE_SECRET_KEY` solo en el servidor y requiere `ADMIN_SETUP_TOKEN`. Después de completar la configuración y comprobar el ingreso, elimina ambas variables de Vercel para retirar ese acceso privilegiado temporal. El flujo solo se puede completar una vez por cuenta.
 
 ## Importación, asignaciones y exportación
 
@@ -42,7 +50,7 @@ Para probar el modo offline local, usa `npm run build` y luego `npm start`; el s
 
 ## Vercel
 
-Importa el repositorio en Vercel y configura `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` en las variables del proyecto. Despliega. No necesitas poner secretos de servidor en el cliente. La configuración de Authentication y el esquema/RLS deben estar aplicados en Supabase antes de probar el dominio publicado.
+Importa el repositorio en Vercel y configura `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` en las variables del proyecto. Para la configuración inicial del administrador, añade también `SUPABASE_SECRET_KEY` y `ADMIN_SETUP_TOKEN` como variables de servidor, despliega, completa el formulario inicial y luego elimina las dos variables privilegiadas. No pongas secretos de servidor en variables `NEXT_PUBLIC_*`. La configuración de Authentication y el esquema/RLS deben estar aplicados en Supabase antes de probar el dominio publicado.
 
 ## Comandos
 

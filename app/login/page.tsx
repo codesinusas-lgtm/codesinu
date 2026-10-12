@@ -14,6 +14,11 @@ export default function LoginPage() {
   const [mode, setMode] = useState<'admin' | 'worker'>('admin');
   const [email, setEmail] = useState(ADMIN_EMAIL);
   const [password, setPassword] = useState('');
+  const [showAdminSetup, setShowAdminSetup] = useState(false);
+  const [setupToken, setSetupToken] = useState('');
+  const [setupPassword, setSetupPassword] = useState('');
+  const [setupPasswordConfirm, setSetupPasswordConfirm] = useState('');
+  const [setupLoading, setSetupLoading] = useState(false);
   const [workers, setWorkers] = useState<WorkerOption[]>([]);
   const [workerUid, setWorkerUid] = useState('');
   const [error, setError] = useState('');
@@ -84,10 +89,51 @@ export default function LoginPage() {
       setError(errorMessage.toLowerCase().includes('invalid api key')
         ? 'Supabase rechazó la API key. Copia la URL y la publishable key del mismo proyecto en Supabase; en Vercel, vuelve a desplegar después de actualizarlas.'
         : code === 'invalid_credentials'
-        ? 'Supabase rechazó el correo o la contraseña. Crea la cuenta del administrador en Authentication → Users.'
+        ? 'El correo o la contraseña no coinciden. Si no recuerdas la clave, usa “Configurar administrador por primera vez” para definirla desde la app.'
         : `No se pudo iniciar sesión como administrador${code ? ` (${code})` : ''}. Comprueba las credenciales y el proyecto Supabase.`);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function setupAdmin(event: React.FormEvent) {
+    event.preventDefault();
+    setError('');
+    if (!navigator.onLine) {
+      setError('La configuración del administrador requiere internet.');
+      return;
+    }
+    if (setupPassword !== setupPasswordConfirm) {
+      setError('Las contraseñas no coinciden.');
+      return;
+    }
+    setSetupLoading(true);
+    try {
+      const response = await fetch('/api/admin/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ token: setupToken, password: setupPassword }),
+      });
+      const result = await response.json() as { message?: string; error?: string };
+      if (!response.ok) throw new Error(result.error || 'No se pudo configurar el administrador.');
+
+      const newPassword = setupPassword;
+      setPassword(newPassword);
+      setShowAdminSetup(false);
+      setSetupToken('');
+      setSetupPassword('');
+      setSetupPasswordConfirm('');
+      const { error: authError } = await getSupabase().auth.signInWithPassword({ email: ADMIN_EMAIL, password: newPassword });
+      if (authError) {
+        setError('La cuenta se configuró, pero no se pudo iniciar sesión automáticamente. Usa el correo y la contraseña nuevos en el formulario de administrador.');
+        return;
+      }
+      router.replace('/admin');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No se pudo configurar el administrador.');
+    } finally {
+      setSetupLoading(false);
     }
   }
 
@@ -145,17 +191,36 @@ export default function LoginPage() {
       </div>
       {!supabaseConfigured && <div className="notice warn" role="alert" style={{ marginBottom: 16 }}>Configura NEXT_PUBLIC_SUPABASE_URL y NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY para conectar Supabase.</div>}
       {error && <div className="notice warn" role="alert" style={{ marginBottom: 16 }}>{error}</div>}
-      {mode === 'admin' ? <form onSubmit={submitAdmin}>
-        <div className="stat-icon" style={{ marginBottom: 16 }}><LockKeyhole size={20} /></div>
-        <p className="small muted" style={{ marginBottom: 14 }}>Acceso reservado para la cuenta administradora.</p>
-        <label className="field" style={{ marginBottom: 15 }}>Correo electrónico
-          <input className="input" type="email" required value={email} readOnly aria-label="Correo administrador" />
-        </label>
-        <label className="field" style={{ marginBottom: 22 }}>Contraseña
-          <input className="input" type="password" required value={password} onChange={event => setPassword(event.target.value)} placeholder="Contraseña del administrador" />
-        </label>
-        <button className="btn" disabled={loading || !supabaseConfigured} style={{ width: '100%', padding: 13 }}>{loading ? 'Ingresando…' : 'Ingresar como administrador'}</button>
-      </form> : <form onSubmit={enterAsWorker}>
+      {mode === 'admin' ? <>
+        <form onSubmit={submitAdmin}>
+          <div className="stat-icon" style={{ marginBottom: 16 }}><LockKeyhole size={20} /></div>
+          <p className="small muted" style={{ marginBottom: 14 }}>Acceso reservado para la cuenta administradora.</p>
+          <label className="field" style={{ marginBottom: 15 }}>Correo electrónico
+            <input className="input" type="email" required value={email} readOnly aria-label="Correo administrador" />
+          </label>
+          <label className="field" style={{ marginBottom: 22 }}>Contraseña
+            <input className="input" type="password" required value={password} onChange={event => setPassword(event.target.value)} placeholder="Contraseña del administrador" />
+          </label>
+          <button className="btn" disabled={loading || setupLoading || !supabaseConfigured} style={{ width: '100%', padding: 13 }}>{loading ? 'Ingresando…' : 'Ingresar como administrador'}</button>
+        </form>
+        <button type="button" className="btn secondary" disabled={loading || setupLoading} onClick={() => { setShowAdminSetup(open => !open); setError(''); }} style={{ width: '100%', marginTop: 12 }}>
+          {showAdminSetup ? 'Volver al ingreso' : 'Configurar administrador por primera vez'}
+        </button>
+        {showAdminSetup && <form onSubmit={setupAdmin} style={{ marginTop: 18, paddingTop: 18, borderTop: '1px solid #e7ebf1' }}>
+          <h2 style={{ fontSize: 16, marginBottom: 8 }}>Configurar acceso sin correo</h2>
+          <p className="small muted" style={{ lineHeight: 1.6, marginBottom: 15 }}>Usa el código privado de 43 caracteres configurado en el servidor. Este proceso crea el usuario o fija la contraseña de la cuenta administradora existente y solo se permite una vez.</p>
+          <label className="field" style={{ marginBottom: 14 }}>Código de configuración
+            <input className="input" type="password" autoComplete="off" required minLength={43} maxLength={43} value={setupToken} onChange={event => setSetupToken(event.target.value)} />
+          </label>
+          <label className="field" style={{ marginBottom: 14 }}>Nueva contraseña (mínimo 12 caracteres)
+            <input className="input" type="password" autoComplete="new-password" required minLength={12} maxLength={128} value={setupPassword} onChange={event => setSetupPassword(event.target.value)} />
+          </label>
+          <label className="field" style={{ marginBottom: 18 }}>Confirma la contraseña
+            <input className="input" type="password" autoComplete="new-password" required minLength={12} maxLength={128} value={setupPasswordConfirm} onChange={event => setSetupPasswordConfirm(event.target.value)} />
+          </label>
+          <button className="btn" disabled={setupLoading || !supabaseConfigured} style={{ width: '100%', padding: 13 }}>{setupLoading ? 'Configurando cuenta…' : 'Crear y entrar como administrador'}</button>
+        </form>}
+      </> : <form onSubmit={enterAsWorker}>
         <div className="stat-icon" style={{ marginBottom: 16 }}><UserRound size={20} /></div>
         <label className="field" style={{ marginBottom: 18 }}>Selecciona tu nombre
           <select className="input" required value={workerUid} onChange={event => setWorkerUid(event.target.value)}>

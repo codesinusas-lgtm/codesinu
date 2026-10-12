@@ -321,7 +321,7 @@ export default function WorkerPage() {
         <div className="brand" style={{ color: '#14213a', marginBottom: 18 }}><span className="brand-mark">S</span> sinucode</div>
         <div className="eyebrow">ESPACIO DE TRABAJO / CAMPO</div>
         <h1 className="page-title">Mis lecturas</h1>
-        <p className="muted" style={{ fontSize: 13, marginTop: 7 }}>{workerName} · Edita tus lecturas. Los cambios quedan guardados en este dispositivo.</p>
+        <p className="muted" style={{ fontSize: 13, marginTop: 7 }}>{workerName} · Cada cambio se guarda primero en este dispositivo y luego se sincroniza con Supabase cuando hay conexión.</p>
       </div>
       <div className="row">
         <span className={`pill ${online ? 'green' : 'orange'}`}>{online ? <><Wifi size={13} /> En línea</> : <><WifiOff size={13} /> Sin conexión</>}</span>
@@ -336,7 +336,7 @@ export default function WorkerPage() {
     <div className="cards" style={{ gridTemplateColumns: 'repeat(auto-fit,minmax(170px,1fr))' }}>
       <div className="card"><div className="stat-label">Asignadas</div><div className="stat-value">{readings.length}</div></div>
       <div className="card"><div className="stat-label">Diligenciadas</div><div className="stat-value">{completedCount}</div><div className="progress"><span style={{ width: `${readings.length ? completedCount / readings.length * 100 : 0}%` }} /></div></div>
-      <div className="card"><div className="stat-label">Por sincronizar</div><div className="stat-value">{pendingSyncCount}</div><div className="stat-foot">Guardadas localmente</div></div>
+      <div className="card"><div className="stat-label">Pendientes de subir a la nube</div><div className="stat-value">{pendingSyncCount}</div><div className="stat-foot">Copias locales aún no confirmadas por Supabase</div></div>
     </div>
 
     <section className="panel" style={{ margin: '18px 0', padding: 16 }}>
@@ -377,14 +377,14 @@ export default function WorkerPage() {
             <div className="muted" style={{ fontSize: 13, lineHeight: 1.5 }}>{String(reading.base.DIRECCION ?? '')}</div>
             <div className="small muted" style={{ marginTop: 5 }}>Medidor: {String(reading.base.MEDIDOR ?? '—')} · Ruta: {String(reading.base.RUTA ?? '—')}</div>
           </div>
-          <span className={`pill ${reading.synced ? 'green' : 'orange'}`}>{reading.synced ? 'Sincronizada' : 'Local'}</span>
+          <span className={`pill ${reading.synced ? 'green' : 'orange'}`}>{reading.synced ? 'En Supabase' : 'Pendiente de nube'}</span>
         </div>
         <div className="form-grid">
           <label className="field">Lectura actual<input className="input" inputMode="decimal" value={reading.reading} onChange={event => void edit(reading, 'reading', event.target.value)} placeholder="Escribe la lectura" /></label>
           <label className="field">Motivo de novedad<select className="input" value={reading.novelty} onChange={event => void edit(reading, 'novelty', event.target.value)}><option value="">Sin novedad</option><option>Inmueble cerrado</option><option>Medidor dañado</option><option>Medidor ilegible</option><option>Predio desocupado</option><option>Acceso impedido</option><option>Medidor retirado</option><option>Otro</option></select></label>
           <label className="field" style={{ gridColumn: '1/-1' }}>Observación<textarea className="input" rows={2} value={reading.observation} onChange={event => void edit(reading, 'observation', event.target.value)} placeholder="Detalle adicional (opcional)" /></label>
         </div>
-        <div className="row between" style={{ marginTop: 12 }}><span className="small muted">Guardado automáticamente en este dispositivo</span><span className="row small" style={{ color: '#138a60' }}><Check size={14} /> Respaldo local</span></div>
+        <div className="row between" style={{ marginTop: 12 }}><span className="small muted">Guardado automáticamente en este dispositivo</span><span className="row small" style={{ color: '#138a60' }}><Check size={14} /> Copia local segura</span></div>
       </article>)}
     </div>}
 
@@ -402,7 +402,7 @@ export default function WorkerPage() {
           <td><input aria-label={`Lectura de contrato ${String(reading.base.CONTRATO ?? '')}`} className="input" style={{ minWidth: 110 }} inputMode="decimal" value={reading.reading} onChange={event => void edit(reading, 'reading', event.target.value)} /></td>
           <td><select aria-label={`Novedad de contrato ${String(reading.base.CONTRATO ?? '')}`} className="input" style={{ minWidth: 150 }} value={reading.novelty} onChange={event => void edit(reading, 'novelty', event.target.value)}><option value="">Sin novedad</option><option>Inmueble cerrado</option><option>Medidor dañado</option><option>Medidor ilegible</option><option>Predio desocupado</option><option>Acceso impedido</option><option>Medidor retirado</option><option>Otro</option></select></td>
           <td><input aria-label={`Observación de contrato ${String(reading.base.CONTRATO ?? '')}`} className="input" style={{ minWidth: 180 }} value={reading.observation} onChange={event => void edit(reading, 'observation', event.target.value)} /></td>
-          <td><span className={`pill ${reading.synced ? 'green' : 'orange'}`}>{reading.synced ? 'Sincronizada' : 'Local'}</span></td>
+          <td><span className={`pill ${reading.synced ? 'green' : 'orange'}`}>{reading.synced ? 'En Supabase' : 'Pendiente de nube'}</span></td>
         </tr>)}</tbody>
       </table>
     </div>}
@@ -440,7 +440,7 @@ export default function WorkerPage() {
         <label className="field" style={{ gridColumn: '1/-1' }}>Observación<textarea className="input" rows={3} value={individualReading.observation} onChange={event => void edit(individualReading, 'observation', event.target.value)} placeholder="Detalle adicional (opcional)" /></label>
       </div>
       <div className="row between" style={{ marginTop: 16, flexWrap: 'wrap' }}>
-        <span className={`pill ${individualReading.synced ? 'green' : 'orange'}`}>{individualReading.synced ? 'Sincronizada' : 'Guardada en este dispositivo'}</span>
+        <span className={`pill ${individualReading.synced ? 'green' : 'orange'}`}>{individualReading.synced ? 'Confirmada en Supabase' : 'Solo en este dispositivo'}</span>
         <span className="small muted">Puedes avanzar al siguiente registro mientras se sincronizan los cambios.</span>
       </div>
     </section>}

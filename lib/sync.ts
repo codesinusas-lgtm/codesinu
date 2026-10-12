@@ -9,14 +9,15 @@ export async function syncPendingReadings(uid: string) {
   const supabase = getSupabase();
   let count = 0;
   for (const item of pending) {
-    const { error } = await supabase.from('readings').update({
+    const { data, error } = await supabase.from('readings').update({
       reading: item.reading,
       observation: item.observation,
       novelty: item.novelty,
       updated_at: item.updatedAt,
       version: item.version,
-    }).eq('id', item.id).eq('worker_uid', uid);
+    }).eq('id', item.id).eq('worker_uid', uid).select('id');
     if (error) throw error;
+    if (!data?.length) throw new Error(`Supabase no confirmó la lectura ${item.id}.`);
     const current = await localDB.readings.get(item.id);
     if (current?.version === item.version) await localDB.readings.update(item.id, { synced: true, workerUid: uid });
     count++;
