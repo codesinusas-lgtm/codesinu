@@ -1,4 +1,4 @@
-export const ADMIN_EMAIL = 'anpa23co@gmail.com';
+export const ADMIN_EMAIL = 'admin@code-sinu';
 
 export function hasAdminAccess(
   email: string | null | undefined,
