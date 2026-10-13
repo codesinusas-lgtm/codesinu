@@ -138,52 +138,119 @@ export async function parseWorkbook(file: File, cycleId: string) {
   }
   if (!rows.length) throw new Error('Encontré encabezados válidos, pero no hay registros para importar.');
 
-  // A workbook with one master sheet and smaller tabs whose contracts all match
-  // the master is a common field assignment format: each tab belongs to its worker.
-  const master = [...sheetRows.entries()].sort((a, b) => b[1].length - a[1].length)[0];
+
+  // Identificar la hoja principal sin descartar las filas de ninguna hoja.
+  const master = [...sheetRows.entries()]
+    .sort((a, b) => b[1].length - a[1].length)[0];
+
   const workerSheetNames = new Set<string>();
   const workersByReadingId = new Map<string, string>();
+
   if (master && master[1].length > 0) {
     const uniqueFields = ['PRODUCTO', 'CONTRATO', 'MEDIDOR', 'CONSEC'].filter(field => {
-      const values = master[1].map(row => String(row.base[field] ?? '').trim()).filter(Boolean);
-      return values.length === master[1].length && new Set(values).size === values.length;
+      const values = master[1]
+        .map(row => String(row.base[field] ?? '').trim())
+        .filter(Boolean);
+
+      return values.length === master[1].length
+        && new Set(values).size === values.length;
     });
+
     const masterIndex = new Map<string, ImportedRow>();
+
     for (const row of master[1]) {
-      for (const field of uniqueFields) masterIndex.set(`${field}::${String(row.base[field]).trim()}`, row);
+      for (const field of uniqueFields) {
+        masterIndex.set(
+          `${field}::${String(row.base[field]).trim()}`,
+          row,
+        );
+      }
     }
+
     const matchMasterRow = (row: ImportedRow) => {
       for (const field of uniqueFields) {
         const value = String(row.base[field] ?? '').trim();
-        const match = value ? masterIndex.get(`${field}::${value}`) : undefined;
+        const match = value
+          ? masterIndex.get(`${field}::${value}`)
+          : undefined;
+
         if (match) return match;
       }
+
       return undefined;
     };
+
     for (const [name, sheetRowsForWorker] of sheetRows) {
-      if (name === master[0] || !sheetRowsForWorker.length || sheetRowsForWorker.length >= master[1].length) continue;
-      const allRowsBelongToMaster = sheetRowsForWorker.every(row => matchMasterRow(row));
-      if (allRowsBelongToMaster) {
-        workerSheetNames.add(name);
-        for (const row of sheetRowsForWorker) {
-          const masterRow = matchMasterRow(row);
-          if (!masterRow) continue;
-          const workerName = row.workerName?.trim() || name.trim();
-          const previousWorker = workersByReadingId.get(masterRow.id);
-          if (previousWorker && previousWorker !== workerName) {
-            throw new Error(`La lectura con PRODUCTO ${masterRow.base.PRODUCTO ?? ''} aparece en las pestañas de ${previousWorker} y ${workerName}. Corrige la asignación duplicada en el Excel.`);
-          }
-          workersByReadingId.set(masterRow.id, workerName);
+      if (
+        name === master[0]
+        || !sheetRowsForWorker.length
+        || sheetRowsForWorker.length >= master[1].length
+      ) {
+        continue;
+      }
+
+      const allRowsBelongToMaster =
+        sheetRowsForWorker.every(row => matchMasterRow(row));
+
+      if (!allRowsBelongToMaster) continue;
+
+      workerSheetNames.add(name);
+
+      for (const row of sheetRowsForWorker) {
+        const masterRow = matchMasterRow(row);
+        if (!masterRow) continue;
+
+        // Si la hoja tiene una columna de trabajador, respetarla.
+        // De lo contrario, usar el nombre de la hoja.
+        const workerName = row.workerName?.trim() || name.trim();
+
+        // La fila física de la hoja de trabajador conserva su identidad.
+        row.workerName = workerName;
+
+        const previousWorker = workersByReadingId.get(masterRow.id);
+
+        if (
+          previousWorker
+          && previousWorker !== workerName
+        ) {
+          throw new Error(
+            `La lectura con PRODUCTO ${masterRow.base.PRODUCTO ?? ''} `
+            + `aparece en las pestañas de ${previousWorker} y ${workerName}. `
+            + 'Revisa la asignación en el Excel.',
+          );
         }
+
+        workersByReadingId.set(masterRow.id, workerName);
       }
     }
   }
+
+  // Vincular también los registros de la hoja principal cuando
+  // se puede determinar a qué trabajador pertenecen.
   for (const row of rows) {
-    if (row.sheetName === master?.[0] && !row.workerName) row.workerName = workersByReadingId.get(row.id);
+    if (
+      row.sheetName === master?.[0]
+      && !row.workerName
+    ) {
+      row.workerName = workersByReadingId.get(row.id);
+    }
   }
-  const sourceCounts = Object.fromEntries([...sheetRows].map(([name, values]) => [name, values.length]));
-  const importedRows = rows.filter(row => !workerSheetNames.has(row.sheetName));
-  return { rows: importedRows, sheetNames, dataSheetNames, skippedSheets, sourceCounts };
+
+  const sourceCounts = Object.fromEntries(
+    [...sheetRows].map(([name, values]) => [name, values.length]),
+  );
+
+  // IMPORTANTE:
+  // No excluir workerSheetNames. Cada fila física del Excel
+  // debe conservarse, aunque coincida con otra hoja.
+  return {
+    rows,
+    sheetNames,
+    dataSheetNames,
+    skippedSheets,
+    sourceCounts,
+  };
+
 }
 
 export async function exportWorkbook(
