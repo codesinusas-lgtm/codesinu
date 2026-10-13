@@ -52,17 +52,55 @@ function normalizeWorkerName(value: string) {
   return value.trim().replace(/\s+/g, ' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('es');
 }
 
-function findDuplicateReadings(_readings: Reading[]): {
-  masterSheet: string;
-  duplicateGroups: Array<{ canonical: Reading; copies: Reading[]; merged: Reading }>;
-  conflictingGroups: number;
-  duplicateCount: number;
-} {
+function findDuplicateReadings(readings: Reading[]) {
+  const sheetCounts = new Map<string, number>();
+  for (const reading of readings) sheetCounts.set(reading.sheetName, (sheetCounts.get(reading.sheetName) || 0) + 1);
+  const masterSheet = [...sheetCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+  const groups = new Map<string, Reading[]>();
+  for (const reading of readings) {
+    const product = String(reading.base.PRODUCTO ?? '').trim();
+    if (!product) continue;
+    const group = groups.get(product) || [];
+    group.push(reading);
+    groups.set(product, group);
+  }
+  const duplicateGroups: Array<{ canonical: Reading; copies: Reading[]; merged: Reading }> = [];
+  let conflictingGroups = 0;
+  for (const group of groups.values()) {
+    if (group.length < 2 || !group.some(row => row.sheetName === masterSheet) || !group.some(row => row.sheetName !== masterSheet)) continue;
+    const masterRows = group.filter(row => row.sheetName === masterSheet);
+    const canonical = masterRows[0];
+    const readingsSet = new Set(group.map(row => row.reading.trim()).filter(Boolean));
+    const workerSet = new Set(group.map(row => row.workerUid).filter((uid): uid is string => Boolean(uid)));
+    const identityConflict = ['CONTRATO', 'MEDIDOR', 'CONSEC', 'NOMBRE', 'DIRECCION'].some(field =>
+      new Set(group.map(row => String(row.base[field] ?? '').trim().toLocaleLowerCase('es')).filter(Boolean)).size > 1,
+    );
+    if (masterRows.length !== 1 || readingsSet.size > 1 || workerSet.size > 1 || identityConflict) {
+      conflictingGroups += 1;
+      continue;
+    }
+    const copies = group.filter(row => row.id !== canonical.id);
+    const uniqueText = (values: string[]) => [...new Set(values.map(value => value.trim()).filter(Boolean))].join(' · ');
+    const assignedCopy = group.find(row => row.workerUid);
+    duplicateGroups.push({
+      canonical,
+      copies,
+      merged: {
+        ...canonical,
+        workerUid: canonical.workerUid || assignedCopy?.workerUid || null,
+        assignmentId: canonical.assignmentId || assignedCopy?.assignmentId || null,
+        assignedAt: canonical.assignedAt || assignedCopy?.assignedAt,
+        reading: canonical.reading.trim() ? canonical.reading : [...readingsSet][0] || '',
+        observation: uniqueText(group.map(row => row.observation)),
+        novelty: uniqueText(group.map(row => row.novelty)),
+      },
+    });
+  }
   return {
-    masterSheet: '',
-    duplicateGroups: [],
-    conflictingGroups: 0,
-    duplicateCount: 0,
+    masterSheet,
+    duplicateGroups,
+    conflictingGroups,
+    duplicateCount: duplicateGroups.reduce((total, group) => total + group.copies.length, 0),
   };
 }
 
@@ -71,6 +109,7 @@ async function fingerprintFile(bytes: ArrayBuffer) {
     const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
     return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
   }
+  // Fingerprinting only prevents accidental reimports; it is not used for authentication.
   const hashes = [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35];
   for (const byte of new Uint8Array(bytes)) {
     for (let index = 0; index < hashes.length; index++) {
@@ -1190,7 +1229,7 @@ export default function AdminPage() {
             </table>
           </div>
           {filtered.length > DETAIL_PAGE_SIZE && <div className="row between" style={{ marginTop: 14 }}><span className="small muted">Página {detailPage + 1} de {pageCount}</span><div className="row"><button className="btn secondary" type="button" disabled={detailPage === 0} onClick={() => setDetailPage(page => Math.max(0, page - 1))}>Anterior</button><button className="btn secondary" type="button" disabled={detailPage + 1 >= pageCount} onClick={() => setDetailPage(page => Math.min(pageCount - 1, page + 1))}>Siguiente</button></div></div>}
-          <div className="small muted" style={{ marginTop: 18, lineHeight: 1.6 }}><CircleHelp size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 5 }} />La exportación usa el archivo original local y marca como “avance” los libros que tenham registros pendientes.</div>
+          <div className="small muted" style={{ marginTop: 18, lineHeight: 1.6 }}><CircleHelp size={14} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 5 }} />La exportación usa el archivo original local y marca como “avance” los libros que tengan registros pendientes.</div>
           {activeCycle && !hasTemplate && <div className="row" style={{ marginTop: 14, flexWrap: 'wrap' }}>
             <label className="field" style={{ flex: '1 1 260px' }}>Vincular plantilla original en este dispositivo
               <input className="input" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={event => setSourceTemplateFile(event.target.files?.[0] || null)} />
